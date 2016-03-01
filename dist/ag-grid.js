@@ -3574,8 +3574,7 @@ var ag;
 var __extends = (this && this.__extends) || function (d, b) {
     for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
     function __() { this.constructor = d; }
-    __.prototype = b.prototype;
-    d.prototype = new __();
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
 };
 var ag;
 (function (ag) {
@@ -7589,7 +7588,12 @@ var ag;
                     this.foundMaxRow = false;
                     this.totalPages = null;
                 }
-                this.currentPage = 0;
+                if (typeof this.datasource.pageNumber === 'number' && this.datasource.pageNumber >= 0) {
+                    this.currentPage = this.datasource.pageNumber;
+                }
+                else {
+                    this.currentPage = 0;
+                }
                 // hide the summary panel until something is loaded
                 this.ePageRowSummaryPanel.style.visibility = 'hidden';
                 this.setTotalLabels();
