@@ -103,7 +103,12 @@ var PaginationController = (function () {
             this.foundMaxRow = false;
             this.totalPages = null;
         }
-        this.currentPage = 0;
+        if (typeof this.datasource.pageNumber === 'number' && this.datasource.pageNumber >= 0) {
+            this.currentPage = this.datasource.pageNumber;
+        }
+        else {
+            this.currentPage = 0;
+        }
         // hide the summary panel until something is loaded
         this.ePageRowSummaryPanel.style.visibility = 'hidden';
         this.setTotalLabels();
