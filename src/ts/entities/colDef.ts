@@ -1,6 +1,10 @@
 import {RowNode} from "./rowNode";
 import {SetFilterParameters} from "../filter/setFilterParameters";
 import {TextAndNumberFilterParameters} from "../filter/textAndNumberFilterParameters";
+import {ICellEditor} from "../rendering/cellEditors/iCellEditor";
+import {ICellRendererFunc, ICellRenderer} from "../rendering/cellRenderers/iCellRenderer";
+import {Column} from "./column";
+
 /** AbstractColDef can be a group or a column definition */
 export interface AbstractColDef {
     /** The name to render in the column header */
@@ -12,13 +16,22 @@ export interface AbstractColDef {
 }
 
 export interface ColGroupDef extends AbstractColDef {
-    /** Columns in this group*/
-    children: AbstractColDef[];
+    /** Columns in this group */
+    children: (ColDef|ColGroupDef)[];
     /** Group ID */
     groupId?: string;
+    /** Open by Default */
+    openByDefault?: boolean;
+    /** If true, group cannot be broken up by column moving, child columns will always appear side by side, however you can rearrange child columns within the group */
+    marryChildren?: boolean;
+}
+
+export interface IAggFunc {
+    (input: any[]): any;
 }
 
 export interface ColDef extends AbstractColDef {
+
     /** The unique ID to give the column. This is optional. If missing, the ID will default to the field.
      *  If both field and colId are missing, a unique ID will be generated.
      *  This ID is used to identify the column in the API for sorting, filtering etc. */
@@ -46,11 +59,18 @@ export interface ColDef extends AbstractColDef {
     /** Whether this column is pinned or not. */
     pinned?: boolean | string;
 
+    /** The field where we get the tooltip on the object */
+    tooltipField?: string;
+    
     /** Tooltip for the column header */
     headerTooltip?: string;
 
     /** Expression or function to get the cells value. */
     valueGetter?: string | Function;
+
+    /** Function to return the key for a value - use this if the value is an object (not a primitive type) and you
+     * want to a) group by this field or b) use set filter on this field. */
+    keyCreator?: Function;
 
     /** To provide custom rendering to the header. */
     headerCellRenderer?: Function | Object;
@@ -74,16 +94,30 @@ export interface ColDef extends AbstractColDef {
     cellStyle?: {} | ((params:any) => {});
 
     /** A function for rendering a cell. */
-    cellRenderer?: Function | {};
+    cellRenderer?: {new(): ICellRenderer} | ICellRendererFunc | string;
+    cellRendererParams?: {};
+
+    /** Cell editor */
+    cellEditor?: {new(): ICellEditor} | string;
+    cellEditorParams?: {};
 
     /** A function for rendering a floating cell. */
-    floatingCellRenderer?: Function | {};
+    floatingCellRenderer?: {new(): ICellRenderer} | ICellRendererFunc | string;
+    floatingCellRendererParams?: {};
 
-    /** Name of function to use for aggregation. One of [sum,min,max]. */
-    aggFunc?: string;
+    /** A function to format a value, should return a string. Not used for CSV export or copy to clipboard, only for UI cell rendering. */
+    cellFormatter?: (params: any) => string;
+    /** A function to format a floating value, should return a string. Not used for CSV export or copy to clipboard, only for UI cell rendering. */
+    floatingCellFormatter?: (params: any) => string;
+
+    /** Name of function to use for aggregation. One of [sum,min,max,first,last] or a function. */
+    aggFunc?: string | IAggFunc;
 
     /** To group by this column by default, provide an index here. */
     rowGroupIndex?: number;
+
+    /** To pivot by this column by default, provide an index here. */
+    pivotIndex?: number;
 
     /** Comparator function for custom sorting. */
     comparator?: (valueA: any, valueB: any, nodeA?: RowNode, nodeB?: RowNode, isInverted?: boolean) => number;
@@ -97,6 +131,12 @@ export interface ColDef extends AbstractColDef {
     /** Set to true if no sorting should be done for this column. */
     suppressSorting?: boolean;
 
+    /** Set to true to not allow moving this column via dragging it's header */
+    suppressMovable?: boolean;
+
+    /** Set to true to not allow filter on this column */
+    suppressFilter?: boolean;
+
     /** Set to true if you want the unsorted icon to be shown when no sort is applied to this column. */
     unSortIcon?: boolean;
 
@@ -108,6 +148,15 @@ export interface ColDef extends AbstractColDef {
 
     /** Set to true if you do not want this column to be auto-resizable by double clicking it's edge. */
     suppressAutoSize?: boolean;
+
+    /** If true, GUI will allow adding this columns as a row group */
+    enableRowGroup?: boolean;
+
+    /** If true, GUI will allow adding this columns as a pivot */
+    enablePivot?: boolean;
+
+    /** If true, GUI will allow adding this columns as a value */
+    enableValue?: boolean;
 
     /** Set to true if this col is editable, otherwise false. Can also be a function to have different rows editable. */
     editable?: boolean | (Function);
@@ -147,4 +196,14 @@ export interface ColDef extends AbstractColDef {
 
     /** Icons for this column. Leave blank to use default. */
     icons?: {[key: string]: string};
+    
+    /** If true, grid will flash cell after cell is refreshed */
+    enableCellChangeFlash?: boolean;
+
+    /** Never set this, it is used internally by grid when doing in-grid pivoting */
+    pivotKeys?: string[];
+
+    /** Never set this, it is used internally by grid when doing in-grid pivoting */
+    pivotValueColumn?: Column;
+
 }

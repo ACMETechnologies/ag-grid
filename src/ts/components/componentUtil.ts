@@ -1,7 +1,8 @@
 import {GridOptions} from "../entities/gridOptions";
 import {GridApi} from "../gridApi";
 import {Events} from "../events";
-import _ from "../utils";
+import {Utils as _} from "../utils";
+import {ColumnApi} from "../columnController/columnController";
 
 export class ComponentUtil {
 
@@ -13,10 +14,12 @@ export class ComponentUtil {
 
     public static STRING_PROPERTIES = [
         'sortingOrder', 'rowClass', 'rowSelection', 'overlayLoadingTemplate',
-        'overlayNoRowsTemplate', 'headerCellTemplate', 'quickFilterText'];
+        'overlayNoRowsTemplate', 'headerCellTemplate', 'quickFilterText', 'rowModelType'];
 
     public static OBJECT_PROPERTIES = [
-        'rowStyle','context','groupColumnDef','localeText','icons','datasource'
+        'rowStyle','context','groupColumnDef','localeText','icons','datasource','viewportDatasource',
+        'groupRowRendererParams', 'aggFuncs'
+        //,'cellRenderers','cellEditors'
     ];
 
     public static ARRAY_PROPERTIES = [
@@ -24,24 +27,35 @@ export class ComponentUtil {
     ];
 
     public static NUMBER_PROPERTIES = [
-        'rowHeight','rowBuffer','colWidth','headerHeight','groupDefaultExpanded'
+        'rowHeight','rowBuffer','colWidth','headerHeight','groupDefaultExpanded',
+        'minColWidth','maxColWidth','viewportRowModelPageSize','viewportRowModelBufferSize',
+        'layoutInterval'
     ];
 
     public static BOOLEAN_PROPERTIES = [
-        'virtualPaging','toolPanelSuppressGroups','toolPanelSuppressValues','rowsAlreadyGrouped',
+        'toolPanelSuppressRowGroups','toolPanelSuppressValues','toolPanelSuppressPivots', 'toolPanelSuppressPivotMode',
         'suppressRowClickSelection','suppressCellSelection','suppressHorizontalScroll','debug',
         'enableColResize','enableCellExpressions','enableSorting','enableServerSideSorting',
         'enableFilter','enableServerSideFilter','angularCompileRows','angularCompileFilters',
-        'angularCompileHeaders','groupSuppressAutoColumn','groupSelectsChildren','groupHideGroupColumns',
+        'angularCompileHeaders','groupSuppressAutoColumn','groupSelectsChildren',
         'groupIncludeFooter','groupUseEntireRow','groupSuppressRow','groupSuppressBlankHeader','forPrint',
         'suppressMenuHide','rowDeselection','unSortIcon','suppressMultiSort','suppressScrollLag',
         'singleClickEdit','suppressLoadingOverlay','suppressNoRowsOverlay','suppressAutoSize',
-        'suppressParentsInRowNodes','showToolPanel'
+        'suppressParentsInRowNodes','showToolPanel','suppressColumnMoveAnimation','suppressMovableColumns',
+        'suppressFieldDotNotation','enableRangeSelection','suppressEnterprise','rowGroupPanelShow',
+        'pivotPanelShow',
+        'suppressContextMenu','suppressMenuFilterPanel','suppressMenuMainPanel','suppressMenuColumnPanel',
+        'enableStatusBar','rememberGroupStateWhenNewData', 'enableCellChangeFlash', 'suppressDragLeaveHidesColumns',
+        'suppressMiddleClickScrolls','suppressPreventDefaultOnMouseWheel', 'suppressUseColIdForGroups',
+        'suppressCopyRowsToClipboard','pivotMode', 'suppressAggFuncInHeader', 'suppressColumnVirtualisation',
+        'suppressFocusAfterRefresh', 'functionsPassive', 'functionsReadOnly'
     ];
 
     public static FUNCTION_PROPERTIES = ['headerCellRenderer', 'localeTextFunc', 'groupRowInnerRenderer',
-        'groupRowRenderer', 'groupAggFunction', 'isScrollLag', 'isExternalFilterPresent',
-        'doesExternalFilterPass', 'getRowClass','getRowStyle', 'getHeaderCellTemplate'];
+        'groupRowRenderer', 'isScrollLag', 'isExternalFilterPresent', 'getRowHeight',
+        'doesExternalFilterPass', 'getRowClass','getRowStyle', 'getHeaderCellTemplate', 'traverseNode',
+        'getContextMenuItems', 'getMainMenuItems', 'processRowPostCreate', 'processCellForClipboard',
+        'getNodeChildDetails', 'groupRowAggNodes'];
 
     public static ALL_PROPERTIES = ComponentUtil.ARRAY_PROPERTIES
         .concat(ComponentUtil.OBJECT_PROPERTIES)
@@ -61,6 +75,7 @@ export class ComponentUtil {
     }
 
     public static copyAttributesToGridOptions(gridOptions: GridOptions, component: any): GridOptions {
+        checkForDeprecated(component);
         // create empty grid options if none were passed
         if (typeof gridOptions !== 'object') {
             gridOptions = <GridOptions> {};
@@ -105,11 +120,12 @@ export class ComponentUtil {
     }
 
     // change this method, the caller should know if it's initialised or not, plus 'initialised'
-    // is not relevant for all component types.
-    // maybe pass in the api and columnApi instead???
-    public static processOnChange(changes: any, gridOptions: GridOptions, api: GridApi): void {
+    // is not relevant for all component types. maybe pass in the api and columnApi instead???
+    public static processOnChange(changes: any, gridOptions: GridOptions, api: GridApi, columnApi: ColumnApi): void {
         //if (!component._initialised || !changes) { return; }
         if (!changes) { return; }
+
+        checkForDeprecated(changes);
 
         // to allow array style lookup in TypeScript, take type away from 'this' and 'gridOptions'
         var pGridOptions = <any> gridOptions;
@@ -140,7 +156,7 @@ export class ComponentUtil {
         });
 
         if (changes.showToolPanel) {
-            api.showToolPanel(changes.showToolPanel.currentValue);
+            api.showToolPanel(ComponentUtil.toBoolean(changes.showToolPanel.currentValue));
         }
 
         if (changes.quickFilterText) {
@@ -168,7 +184,11 @@ export class ComponentUtil {
         }
 
         if (changes.headerHeight) {
-            api.setHeaderHeight(changes.headerHeight.currentValue);
+            api.setHeaderHeight(ComponentUtil.toNumber(changes.headerHeight.currentValue));
+        }
+        
+        if (changes.pivotMode) {
+            columnApi.setPivotMode(ComponentUtil.toBoolean(changes.pivotMode.currentValue));
         }
     }
 
@@ -198,3 +218,12 @@ export class ComponentUtil {
 _.iterateObject(Events, function(key, value) {
     ComponentUtil.EVENTS.push(value);
 });
+
+function checkForDeprecated(changes: any): void {
+    if (changes.ready || changes.onReady) {
+        console.warn('ag-grid: as of v3.3 ready event is now called gridReady, so the callback should be onGridReady');
+    }
+    if (changes.rowDeselected || changes.onRowDeselected) {
+        console.warn('ag-grid: as of v3.4 rowDeselected no longer exists. Please check the docs.');
+    }
+}

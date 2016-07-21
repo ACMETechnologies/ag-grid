@@ -1,44 +1,45 @@
-import _ from '../utils';
-import constants from "../constants";
-import SvgFactory from "../svgFactory";
-import RenderedHeaderElement from "./renderedHeaderElement";
-import ColumnGroup from "../entities/columnGroup";
+import {Utils as _} from "../utils";
+import {SvgFactory} from "../svgFactory";
+import {ColumnGroup} from "../entities/columnGroup";
 import {ColumnController} from "../columnController/columnController";
-import FilterManager from "../filter/filterManager";
-import {Grid} from "../grid";
-import GridOptionsWrapper from "../gridOptionsWrapper";
-import Column from "../entities/column";
+import {FilterManager} from "../filter/filterManager";
+import {GridOptionsWrapper} from "../gridOptionsWrapper";
+import {Column} from "../entities/column";
+import {HorizontalDragService} from "./horizontalDragService";
+import {Autowired, PostConstruct} from "../context/context";
+import {CssClassApplier} from "./cssClassApplier";
+import {IRenderedHeaderElement} from "./iRenderedHeaderElement";
+import {DragSource, DropTarget, DragAndDropService} from "../dragAndDrop/dragAndDropService";
+import {SetLeftFeature} from "../rendering/features/setLeftFeature";
 
 var svgFactory = SvgFactory.getInstance();
 
-export default class RenderedHeaderGroupCell extends RenderedHeaderElement {
+export class RenderedHeaderGroupCell implements IRenderedHeaderElement {
+
+    @Autowired('filterManager') private filterManager: FilterManager;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('horizontalDragService') private dragService: HorizontalDragService;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('dragAndDropService') private dragAndDropService: DragAndDropService;
 
     private eHeaderGroupCell: HTMLElement;
     private eHeaderCellResize: HTMLElement;
     private columnGroup: ColumnGroup;
-    private columnController: ColumnController;
+    private dragSourceDropTarget: DropTarget;
 
     private groupWidthStart: number;
     private childrenWidthStarts: number[];
-    private parentScope: any;
-    private filterManager: FilterManager;
-    private $compile: any;
-    private angularGrid: Grid;
+    private destroyFunctions: (()=>void)[] = [];
 
-    constructor(columnGroup:ColumnGroup, gridOptionsWrapper:GridOptionsWrapper,
-                columnController: ColumnController, eRoot: HTMLElement, angularGrid: Grid,
-                parentScope: any, filterManager: FilterManager, $compile: any) {
-        super(eRoot, gridOptionsWrapper);
-        this.columnController = columnController;
+    private eRoot: HTMLElement;
+
+    private displayName: string;
+
+    constructor(columnGroup: ColumnGroup, eRoot: HTMLElement, dragSourceDropTarget: DropTarget) {
         this.columnGroup = columnGroup;
-        this.parentScope = parentScope;
-        this.filterManager = filterManager;
-        this.$compile = $compile;
-        this.angularGrid = angularGrid;
-        this.setupComponents();
+        this.eRoot = eRoot;
+        this.dragSourceDropTarget = dragSourceDropTarget;
     }
-
-
 
     public getGui(): HTMLElement {
         return this.eHeaderGroupCell;
@@ -46,78 +47,173 @@ export default class RenderedHeaderGroupCell extends RenderedHeaderElement {
 
     public onIndividualColumnResized(column: Column) {
         if (this.columnGroup.isChildInThisGroupDeepSearch(column)) {
-            this.setWidthOfGroupHeaderCell();
+            this.setWidth();
         }
     }
 
-    private setupComponents() {
+    @PostConstruct
+    public init(): void {
 
         this.eHeaderGroupCell = document.createElement('div');
-        var classNames = ['ag-header-group-cell'];
-        // having different classes below allows the style to not have a bottom border
-        // on the group header, if no group is specified
-        if (this.columnGroup.getColGroupDef()) {
-            classNames.push('ag-header-group-cell-with-group');
-        } else {
-            classNames.push('ag-header-group-cell-no-group');
-        }
-        this.eHeaderGroupCell.className = classNames.join(' ');
-        this.eHeaderGroupCell.style.height = this.getGridOptionsWrapper().getHeaderHeight() + 'px';
-        this.addHeaderClassesFromCollDef(this.columnGroup.getColGroupDef(), this.eHeaderGroupCell);
 
-        if (this.getGridOptionsWrapper().isEnableColResize()) {
-            this.eHeaderCellResize = document.createElement("div");
-            this.eHeaderCellResize.className = "ag-header-cell-resize";
-            this.eHeaderGroupCell.appendChild(this.eHeaderCellResize);
-            this.addDragHandler(this.eHeaderCellResize);
+        CssClassApplier.addHeaderClassesFromCollDef(this.columnGroup.getColGroupDef(), this.eHeaderGroupCell, this.gridOptionsWrapper);
 
-            if (!this.getGridOptionsWrapper().isSuppressAutoSize()) {
-                this.eHeaderCellResize.addEventListener('dblclick', (event:MouseEvent) => {
-                    // get list of all the column keys we are responsible for
-                    var keys: string[] = [];
-                    this.columnGroup.getDisplayedLeafColumns().forEach( (column: Column)=>{
-                        // not all cols in the group may be participating with auto-resize
-                        if (!column.getColDef().suppressAutoSize) {
-                            keys.push(column.getColId());
-                        }
-                    });
-                    if (keys.length>0) {
-                        this.columnController.autoSizeColumns(keys);
-                    }
-                });
-            }
-        }
+        this.displayName = this.columnGroup.getHeaderName();
 
+        this.setupResize();
+        this.addClasses();
+        this.setupLabel();
+        this.setupMove();
+        this.setWidth();
+
+        var setLeftFeature = new SetLeftFeature(this.columnGroup, this.eHeaderGroupCell);
+        this.destroyFunctions.push(setLeftFeature.destroy.bind(setLeftFeature));
+    }
+
+    private setupLabel(): void {
         // no renderer, default text render
-        var groupName = this.columnGroup.getHeaderName();
-        if (groupName && groupName !== '') {
+        if (this.displayName && this.displayName !== '') {
             var eGroupCellLabel = document.createElement("div");
             eGroupCellLabel.className = 'ag-header-group-cell-label';
             this.eHeaderGroupCell.appendChild(eGroupCellLabel);
 
+            if (_.isBrowserSafari()) {
+                eGroupCellLabel.style.display = 'table-cell';
+            }
+
             var eInnerText = document.createElement("span");
             eInnerText.className = 'ag-header-group-text';
-            eInnerText.innerHTML = groupName;
+            eInnerText.innerHTML = this.displayName;
             eGroupCellLabel.appendChild(eInnerText);
 
             if (this.columnGroup.isExpandable()) {
                 this.addGroupExpandIcon(eGroupCellLabel);
             }
         }
-
-        this.setWidthOfGroupHeaderCell();
     }
 
-    private setWidthOfGroupHeaderCell() {
-        this.eHeaderGroupCell.style.width = _.formatWidth(this.columnGroup.getActualWidth());
+    private addClasses(): void {
+        _.addCssClass(this.eHeaderGroupCell, 'ag-header-group-cell');
+        // having different classes below allows the style to not have a bottom border
+        // on the group header, if no group is specified
+        if (this.columnGroup.getColGroupDef()) {
+            _.addCssClass(this.eHeaderGroupCell, 'ag-header-group-cell-with-group');
+        } else {
+            _.addCssClass(this.eHeaderGroupCell, 'ag-header-group-cell-no-group');
+        }
+    }
+
+    private setupResize(): void {
+        if (!this.gridOptionsWrapper.isEnableColResize()) { return; }
+
+        this.eHeaderCellResize = document.createElement("div");
+        this.eHeaderCellResize.className = "ag-header-cell-resize";
+        this.eHeaderGroupCell.appendChild(this.eHeaderCellResize);
+        this.dragService.addDragHandling({
+            eDraggableElement: this.eHeaderCellResize,
+            eBody: this.eRoot,
+            cursor: 'col-resize',
+            startAfterPixels: 0,
+            onDragStart: this.onDragStart.bind(this),
+            onDragging: this.onDragging.bind(this)
+        });
+
+        if (!this.gridOptionsWrapper.isSuppressAutoSize()) {
+            this.eHeaderCellResize.addEventListener('dblclick', (event:MouseEvent) => {
+                // get list of all the column keys we are responsible for
+                var keys: string[] = [];
+                this.columnGroup.getDisplayedLeafColumns().forEach( (column: Column)=>{
+                    // not all cols in the group may be participating with auto-resize
+                    if (!column.getColDef().suppressAutoSize) {
+                        keys.push(column.getColId());
+                    }
+                });
+                if (keys.length>0) {
+                    this.columnController.autoSizeColumns(keys);
+                }
+            });
+        }
+    }
+
+    private isSuppressMoving(): boolean {
+        // if any child is fixed, then don't allow moving
+        var childSuppressesMoving = false;
+        this.columnGroup.getLeafColumns().forEach( (column: Column) => {
+            if (column.getColDef().suppressMovable) {
+                childSuppressesMoving = true;
+            }
+        });
+
+        var result = childSuppressesMoving
+            || this.gridOptionsWrapper.isSuppressMovableColumns()
+            || this.gridOptionsWrapper.isForPrint()
+            || this.columnController.isPivotMode();
+
+        return result;
+    }
+
+    private setupMove(): void {
+        var eLabel = <HTMLElement> this.eHeaderGroupCell.querySelector('.ag-header-group-cell-label');
+        if (!eLabel) { return; }
+
+        if (this.isSuppressMoving()) { return; }
+    
+        if (eLabel) {
+            var dragSource: DragSource = {
+                eElement: eLabel,
+                dragItemName: this.displayName,
+                // we add in the original group leaf columns, so we move both visible and non-visible items
+                dragItem: this.getAllColumnsInThisGroup(),
+                dragSourceDropTarget: this.dragSourceDropTarget
+            };
+            this.dragAndDropService.addDragSource(dragSource);
+        }
+    }
+
+    // when moving the columns, we want to move all the columns in this group in one go, and in the order they
+    // are currently in the screen.
+    public getAllColumnsInThisGroup(): Column[] {
+        var allColumnsOriginalOrder = this.columnGroup.getOriginalColumnGroup().getLeafColumns();
+        var allColumnsCurrentOrder: Column[] = [];
+        this.columnController.getAllDisplayedColumns().forEach( column => {
+            if (allColumnsOriginalOrder.indexOf(column) >= 0) {
+                allColumnsCurrentOrder.push(column);
+                _.removeFromArray(allColumnsOriginalOrder, column);
+            }
+        });
+        // we are left with non-visible columns, stick these in at the end
+        allColumnsOriginalOrder.forEach( column => allColumnsCurrentOrder.push(column));
+
+        return allColumnsCurrentOrder;
+    }
+
+    private setWidth(): void {
+        var widthChangedListener = () => {
+            this.eHeaderGroupCell.style.width = this.columnGroup.getActualWidth() + 'px';
+        };
+
+        this.columnGroup.getLeafColumns().forEach( column => {
+            column.addEventListener(Column.EVENT_WIDTH_CHANGED, widthChangedListener);
+            this.destroyFunctions.push( () => {
+                column.removeEventListener(Column.EVENT_WIDTH_CHANGED, widthChangedListener);
+            });
+        });
+
+        widthChangedListener();
+    }
+
+    public destroy(): void {
+        this.destroyFunctions.forEach( (func)=> {
+            func();
+        });
     }
 
     private addGroupExpandIcon(eGroupCellLabel: HTMLElement) {
         var eGroupIcon: any;
         if (this.columnGroup.isExpanded()) {
-            eGroupIcon = _.createIcon('columnGroupOpened', this.getGridOptionsWrapper(), null, svgFactory.createArrowLeftSvg);
+            eGroupIcon = _.createIcon('columnGroupOpened', this.gridOptionsWrapper, null, svgFactory.createGroupContractedIcon);
         } else {
-            eGroupIcon = _.createIcon('columnGroupClosed', this.getGridOptionsWrapper(), null, svgFactory.createArrowRightSvg);
+            eGroupIcon = _.createIcon('columnGroupClosed', this.gridOptionsWrapper, null, svgFactory.createGroupExpandedIcon);
         }
         eGroupIcon.className = 'ag-header-expand-icon';
         eGroupCellLabel.appendChild(eGroupIcon);
@@ -140,15 +236,10 @@ export default class RenderedHeaderGroupCell extends RenderedHeaderElement {
     public onDragging(dragChange: any, finished: boolean): void {
 
         var newWidth = this.groupWidthStart + dragChange;
-        var minWidth = this.columnGroup.getMinimumWidth();
+        var minWidth = this.columnGroup.getMinWidth();
         if (newWidth < minWidth) {
             newWidth = minWidth;
         }
-
-        // set the new width to the group header
-        //var newWidthPx = newWidth + "px";
-        //this.eHeaderGroupCell.style.width = newWidthPx;
-        //this.columnGroup.actualWidth = newWidth;
 
         // distribute the new width to the child headers
         var changeRatio = newWidth / this.groupWidthStart;
@@ -163,8 +254,8 @@ export default class RenderedHeaderGroupCell extends RenderedHeaderElement {
                 // if not the last col, calculate the column width as normal
                 var startChildSize = this.childrenWidthStarts[index];
                 newChildSize = startChildSize * changeRatio;
-                if (newChildSize < column.getMinimumWidth()) {
-                    newChildSize = column.getMinimumWidth();
+                if (newChildSize < column.getMinWidth()) {
+                    newChildSize = column.getMinWidth();
                 }
                 pixelsToDistribute -= newChildSize;
             } else {

@@ -1,45 +1,85 @@
-import CsvCreator from "./csvCreator";
-import {Grid} from "./grid";
-import RowRenderer from "./rendering/rowRenderer";
-import HeaderRenderer from "./headerRendering/headerRenderer";
-import FilterManager from "./filter/filterManager";
+import {CsvCreator, CsvExportParams} from "./csvCreator";
+import {RowRenderer} from "./rendering/rowRenderer";
+import {HeaderRenderer} from "./headerRendering/headerRenderer";
+import {FilterManager} from "./filter/filterManager";
 import {ColumnController} from "./columnController/columnController";
-import InMemoryRowController from "./rowControllers/inMemoryRowController";
-import SelectionController from "./selectionController";
-import GridOptionsWrapper from "./gridOptionsWrapper";
-import GridPanel from "./gridPanel/gridPanel";
-import ValueService from "./valueService";
-import MasterSlaveService from "./masterSlaveService";
-import EventService from "./eventService";
-import FloatingRowModel from "./rowControllers/floatingRowModel";
-import CsvExportParams from "./csvCreator";
-import {ColDef} from "./entities/colDef";
+import {SelectionController} from "./selectionController";
+import {GridOptionsWrapper} from "./gridOptionsWrapper";
+import {GridPanel} from "./gridPanel/gridPanel";
+import {ValueService} from "./valueService";
+import {MasterSlaveService} from "./masterSlaveService";
+import {EventService} from "./eventService";
+import {FloatingRowModel} from "./rowControllers/floatingRowModel";
+import {ColDef, IAggFunc} from "./entities/colDef";
 import {RowNode} from "./entities/rowNode";
-import Constants from "./constants";
+import {Constants} from "./constants";
+import {Column} from "./entities/column";
+import {Bean, PostConstruct, Context, Autowired, Optional} from "./context/context";
+import {GridCore} from "./gridCore";
+import {IRowModel} from "./interfaces/iRowModel";
+import {SortController} from "./sortController";
+import {PaginationController} from "./rowControllers/paginationController";
+import {FocusedCellController} from "./focusedCellController";
+import {IRangeController, RangeSelection, AddRangeSelectionParams} from "./interfaces/iRangeController";
+import {GridCell} from "./entities/gridCell";
+import {IClipboardService} from "./interfaces/iClipboardService";
+import {IInMemoryRowModel} from "./interfaces/iInMemoryRowModel";
+import {Utils as _} from "./utils";
+import {IViewportDatasource} from "./interfaces/iViewportDatasource";
+import {IMenuFactory} from "./interfaces/iMenuFactory";
+import {VirtualPageRowModel} from "./rowControllers/virtualPageRowModel";
+import {CellRendererFactory} from "./rendering/cellRendererFactory";
+import {CellEditorFactory} from "./rendering/cellEditorFactory";
+import {IAggFuncService} from "./interfaces/iAggFuncService";
 
+@Bean('gridApi')
 export class GridApi {
 
-    private csvCreator: CsvCreator;
+    @Autowired('csvCreator') private csvCreator: CsvCreator;
+    @Autowired('gridCore') private gridCore: GridCore;
+    @Autowired('rowRenderer') private rowRenderer: RowRenderer;
+    @Autowired('headerRenderer') private headerRenderer: HeaderRenderer;
+    @Autowired('filterManager') private filterManager: FilterManager;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('selectionController') private selectionController: SelectionController;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('gridPanel') private gridPanel: GridPanel;
+    @Autowired('valueService') private valueService: ValueService;
+    @Autowired('masterSlaveService') private masterSlaveService: MasterSlaveService;
+    @Autowired('eventService') private eventService: EventService;
+    @Autowired('floatingRowModel') private floatingRowModel: FloatingRowModel;
+    @Autowired('context') private context: Context;
+    @Autowired('rowModel') private rowModel: IRowModel;
+    @Autowired('sortController') private sortController: SortController;
+    @Autowired('paginationController') private paginationController: PaginationController;
+    @Autowired('focusedCellController') private focusedCellController: FocusedCellController;
+    @Optional('rangeController') private rangeController: IRangeController;
+    @Optional('clipboardService') private clipboardService: IClipboardService;
+    @Optional('aggFuncService') private aggFuncService: IAggFuncService;
+    @Autowired('menuFactory') private menuFactory: IMenuFactory;
+    @Autowired('cellRendererFactory') private cellRendererFactory: CellRendererFactory;
+    @Autowired('cellEditorFactory') private cellEditorFactory: CellEditorFactory;
 
-    constructor(private grid: Grid,
-                private rowRenderer: RowRenderer,
-                private headerRenderer: HeaderRenderer,
-                private filterManager: FilterManager,
-                private columnController: ColumnController,
-                private inMemoryRowController: InMemoryRowController,
-                private selectionController: SelectionController,
-                private gridOptionsWrapper: GridOptionsWrapper,
-                private gridPanel: GridPanel,
-                private valueService: ValueService,
-                private masterSlaveService: MasterSlaveService,
-                private eventService: EventService,
-                private floatingRowModel: FloatingRowModel) {
-        this.csvCreator = new CsvCreator(this.inMemoryRowController, this.columnController, this.grid, this.valueService);
+    private inMemoryRowModel: IInMemoryRowModel;
+
+    @PostConstruct
+    private init(): void {
+        if (this.rowModel.getType()===Constants.ROW_MODEL_TYPE_NORMAL) {
+            this.inMemoryRowModel = <IInMemoryRowModel> this.rowModel;
+        }
     }
 
     /** Used internally by grid. Not intended to be used by the client. Interface may change between releases. */
     public __getMasterSlaveService(): MasterSlaveService {
         return this.masterSlaveService;
+    }
+
+    public getFirstRenderedRow(): number {
+        return this.rowRenderer.getFirstVirtualRenderedRow();
+    }
+
+    public getLastRenderedRow(): number {
+        return this.rowRenderer.getLastVirtualRenderedRow();
     }
 
     public getDataAsCsv(params?: CsvExportParams): string {
@@ -51,60 +91,52 @@ export class GridApi {
     }
 
     public setDatasource(datasource:any) {
-        this.grid.setDatasource(datasource);
+        if (this.gridOptionsWrapper.isRowModelPagination()) {
+            this.paginationController.setDatasource(datasource);
+        } else if (this.gridOptionsWrapper.isRowModelVirtual()) {
+            (<VirtualPageRowModel>this.rowModel).setDatasource(datasource);
+        } else {
+            console.warn(`ag-Grid: you can only use a datasource when gridOptions.rowModelType is '${Constants.ROW_MODEL_TYPE_VIRTUAL}' or '${Constants.ROW_MODEL_TYPE_PAGINATION}'`)
+        }
     }
 
-    public onNewDatasource() {
-        console.log('ag-Grid: onNewDatasource deprecated, please use setDatasource()');
-        this.grid.setDatasource();
+    public setViewportDatasource(viewportDatasource: IViewportDatasource) {
+        if (this.gridOptionsWrapper.isRowModelViewport()) {
+            // this is bad coding, because it's using an interface that's exposed in the enterprise.
+            // really we should create an interface in the core for viewportDatasource and let
+            // the enterprise implement it, rather than casting to 'any' here
+            (<any>this.rowModel).setViewportDatasource(viewportDatasource);
+        } else {
+            console.warn(`ag-Grid: you can only use a datasource when gridOptions.rowModelType is '${Constants.ROW_MODEL_TYPE_VIEWPORT}'`)
+        }
     }
-
-    public setRowData(rowData:any) {
-        this.grid.setRowData(rowData);
-    }
-
-    public setRows(rows:any) {
-        console.log('ag-Grid: setRows deprecated, please use setRowData()');
-        this.grid.setRowData(rows);
-    }
-
-    public onNewRows() {
-        console.log('ag-Grid: onNewRows deprecated, please use setRowData()');
-        this.grid.setRowData();
+    
+    public setRowData(rowData: any[]) {
+        if (this.gridOptionsWrapper.isRowModelDefault()) {
+            this.inMemoryRowModel.setRowData(rowData, true);
+        } else {
+            console.log('cannot call setRowData unless using normal row model');
+        }
     }
 
     public setFloatingTopRowData(rows: any[]): void {
         this.floatingRowModel.setFloatingTopRowData(rows);
-        this.gridPanel.onBodyHeightChange();
-        this.refreshView();
     }
 
     public setFloatingBottomRowData(rows: any[]): void {
         this.floatingRowModel.setFloatingBottomRowData(rows);
-        this.gridPanel.onBodyHeightChange();
-        this.refreshView();
-    }
-
-    public onNewCols() {
-        console.error("ag-Grid: deprecated, please call setColumnDefs instead providing a list of the defs");
-        this.grid.setColumnDefs();
     }
 
     public setColumnDefs(colDefs: ColDef[]) {
-        this.grid.setColumnDefs(colDefs);
-    }
-
-    public unselectAll() {
-        console.error("unselectAll deprecated, call deselectAll instead");
-        this.deselectAll();
+        this.columnController.setColumnDefs(colDefs);
     }
 
     public refreshRows(rowNodes: RowNode[]): void {
         this.rowRenderer.refreshRows(rowNodes);
     }
 
-    public refreshCells(rowNodes: RowNode[], colIds: string[]): void {
-        this.rowRenderer.refreshCells(rowNodes, colIds);
+    public refreshCells(rowNodes: RowNode[], colIds: string[], animate = false): void {
+        this.rowRenderer.refreshCells(rowNodes, colIds, animate);
     }
 
     public rowDataChanged(rows:any) {
@@ -113,6 +145,10 @@ export class GridApi {
 
     public refreshView() {
         this.rowRenderer.refreshView();
+    }
+
+    public setFunctionsReadOnly(readOnly: boolean) {
+        this.gridOptionsWrapper.setProperty('functionsReadOnly', readOnly);
     }
 
     public softRefreshView() {
@@ -126,7 +162,6 @@ export class GridApi {
     public refreshHeader() {
         // need to review this - the refreshHeader should also refresh all icons in the header
         this.headerRenderer.refreshHeader();
-        this.headerRenderer.updateFilterIcons();
     }
 
     public isAnyFilterPresent(): boolean {
@@ -141,64 +176,97 @@ export class GridApi {
         return this.filterManager.isQuickFilterPresent();
     }
 
-    public getModel() {
-        return this.grid.getRowModel();
+    public getModel(): IRowModel {
+        return this.rowModel;
     }
 
-    public onGroupExpandedOrCollapsed(refreshFromIndex:any) {
-        this.grid.updateModelAndRefresh(Constants.STEP_MAP, refreshFromIndex);
+    public onGroupExpandedOrCollapsed(refreshFromIndex?: any) {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call onGroupExpandedOrCollapsed unless using normal row model') }
+        this.inMemoryRowModel.refreshModel(Constants.STEP_MAP, refreshFromIndex);
     }
 
+    public refreshInMemoryRowModel(): any {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call refreshInMemoryRowModel unless using normal row model') }
+        this.inMemoryRowModel.refreshModel(Constants.STEP_EVERYTHING);
+    }
+    
     public expandAll() {
-        this.inMemoryRowController.expandOrCollapseAll(true, null);
-        this.grid.updateModelAndRefresh(Constants.STEP_MAP);
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call expandAll unless using normal row model') }
+        this.inMemoryRowModel.expandOrCollapseAll(true);
     }
 
     public collapseAll() {
-        this.inMemoryRowController.expandOrCollapseAll(false, null);
-        this.grid.updateModelAndRefresh(Constants.STEP_MAP);
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call collapseAll unless using normal row model') }
+        this.inMemoryRowModel.expandOrCollapseAll(false);
     }
 
     public addVirtualRowListener(eventName: string, rowIndex: number, callback: Function) {
         if (typeof eventName !== 'string') {
-            console.log('ag-Grid: addVirtualRowListener has changed, the first parameter should be the event name, pleae check the documentation.');
+            console.log('ag-Grid: addVirtualRowListener is deprecated, please use addRenderedRowListener.');
         }
-        this.grid.addVirtualRowListener(eventName, rowIndex, callback);
+        this.addRenderedRowListener(eventName, rowIndex, callback);
     }
 
-    public setQuickFilter(newFilter:any) {
-        this.grid.onQuickFilterChanged(newFilter)
+    public addRenderedRowListener(eventName: string, rowIndex: number, callback: Function) {
+        if (eventName==='virtualRowRemoved') {
+            console.log('ag-Grid: event virtualRowRemoved is deprecated, now called renderedRowRemoved');
+            eventName = '' +
+                '';
+        }
+        if (eventName==='virtualRowSelected') {
+            console.log('ag-Grid: event virtualRowSelected is deprecated, to register for individual row ' +
+                'selection events, add a listener directly to the row node.');
+        }
+        this.rowRenderer.addRenderedRowListener(eventName, rowIndex, callback);
+    }
+
+    public setQuickFilter(newFilter:any): void {
+        this.filterManager.setQuickFilter(newFilter)
     }
 
     public selectIndex(index:any, tryMulti:any, suppressEvents:any) {
-        this.selectionController.selectIndex(index, tryMulti, suppressEvents);
+        console.log('ag-Grid: do not use api for selection, call node.setSelected(value) instead');
+        if (suppressEvents) {
+            console.log('ag-Grid: suppressEvents is no longer supported, stop listening for the event if you no longer want it');
+        }
+        this.selectionController.selectIndex(index, tryMulti);
     }
 
     public deselectIndex(index: number, suppressEvents: boolean = false) {
-        this.selectionController.deselectIndex(index, suppressEvents);
+        console.log('ag-Grid: do not use api for selection, call node.setSelected(value) instead');
+        if (suppressEvents) {
+            console.log('ag-Grid: suppressEvents is no longer supported, stop listening for the event if you no longer want it');
+        }
+        this.selectionController.deselectIndex(index);
     }
 
-    public selectNode(node:any, tryMulti: boolean = false, suppressEvents: boolean = false) {
-        this.selectionController.selectNode(node, tryMulti, suppressEvents);
+    public selectNode(node: RowNode, tryMulti: boolean = false, suppressEvents: boolean = false) {
+        console.log('ag-Grid: API for selection is deprecated, call node.setSelected(value) instead');
+        if (suppressEvents) {
+            console.log('ag-Grid: suppressEvents is no longer supported, stop listening for the event if you no longer want it');
+        }
+        node.setSelectedParams({newValue: true, clearSelection: !tryMulti});
     }
 
-    public deselectNode(node:any, suppressEvents: boolean = false) {
-        this.selectionController.deselectNode(node, suppressEvents);
+    public deselectNode(node: RowNode, suppressEvents: boolean = false) {
+        console.log('ag-Grid: API for selection is deprecated, call node.setSelected(value) instead');
+        if (suppressEvents) {
+            console.log('ag-Grid: suppressEvents is no longer supported, stop listening for the event if you no longer want it');
+        }
+        node.setSelectedParams({newValue: false});
     }
 
     public selectAll() {
-        this.selectionController.selectAll();
-        this.rowRenderer.refreshView();
+        this.selectionController.selectAllRowNodes();
     }
 
     public deselectAll() {
-        this.selectionController.deselectAll();
-        this.rowRenderer.refreshView();
+        this.selectionController.deselectAllRowNodes();
     }
 
-    public recomputeAggregates() {
-        this.inMemoryRowController.doAggregate();
-        this.rowRenderer.refreshGroupRows();
+    public recomputeAggregates(): void {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call recomputeAggregates unless using normal row model') }
+        this.inMemoryRowModel.refreshModel(Constants.STEP_AGGREGATE);
     }
 
     public sizeColumnsToFit() {
@@ -210,32 +278,25 @@ export class GridApi {
     }
 
     public showLoadingOverlay(): void {
-        this.grid.showLoadingOverlay();
+        this.gridPanel.showLoadingOverlay();
     }
 
     public showNoRowsOverlay(): void {
-        this.grid.showNoRowsOverlay();
+        this.gridPanel.showNoRowsOverlay();
     }
 
     public hideOverlay(): void {
-        this.grid.hideOverlay();
-    }
-
-    public showLoading(show: any) {
-        console.warn('ag-Grid: showLoading is deprecated, please use api.showLoadingOverlay() and api.hideOverlay() instead');
-        if (show) {
-            this.grid.showLoadingOverlay();
-        } else {
-            this.grid.hideOverlay();
-        }
+        this.gridPanel.hideOverlay();
     }
 
     public isNodeSelected(node:any) {
-        return this.selectionController.isNodeSelected(node);
+        console.log('ag-Grid: no need to call api.isNodeSelected(), just call node.isSelected() instead');
+        return node.isSelected();
     }
 
     public getSelectedNodesById(): {[nodeId: number]: RowNode;} {
-        return this.selectionController.getSelectedNodesById();
+        console.error('ag-Grid: since version 3.4, getSelectedNodesById no longer exists, use getSelectedNodes() instead');
+        return null;
     }
 
     public getSelectedNodes(): RowNode[] {
@@ -255,7 +316,11 @@ export class GridApi {
     }
 
     public ensureColIndexVisible(index:any) {
-        this.gridPanel.ensureColIndexVisible(index);
+        console.warn('ag-Grid: ensureColIndexVisible(index) no longer supported, use ensureColumnVisible(colKey) instead.');
+    }
+
+    public ensureColumnVisible(key: string|Column|ColDef) {
+        this.gridPanel.ensureColumnVisible(key);
     }
 
     public ensureIndexVisible(index:any) {
@@ -263,24 +328,26 @@ export class GridApi {
     }
 
     public ensureNodeVisible(comparator:any) {
-        this.grid.ensureNodeVisible(comparator);
+        this.gridCore.ensureNodeVisible(comparator);
     }
 
-    public forEachInMemory(callback: Function) {
-        console.warn('ag-Grid: please use forEachNode instead of forEachInMemory, method is same, I just renamed it, forEachInMemory is deprecated');
-        this.forEachNode(callback);
+    public forEachLeafNode(callback: (rowNode: RowNode)=>void ) {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call forEachNodeAfterFilter unless using normal row model') }
+        this.inMemoryRowModel.forEachLeafNode(callback);
     }
 
-    public forEachNode(callback: Function) {
-        this.grid.getRowModel().forEachNode(callback);
+    public forEachNode(callback: (rowNode: RowNode)=>void ) {
+        this.rowModel.forEachNode(callback);
     }
 
-    public forEachNodeAfterFilter(callback: Function) {
-        this.grid.getRowModel().forEachNodeAfterFilter(callback);
+    public forEachNodeAfterFilter(callback: (rowNode: RowNode)=>void) {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call forEachNodeAfterFilter unless using normal row model') }
+        this.inMemoryRowModel.forEachNodeAfterFilter(callback);
     }
 
-    public forEachNodeAfterFilterAndSort(callback: Function) {
-        this.grid.getRowModel().forEachNodeAfterFilterAndSort(callback);
+    public forEachNodeAfterFilterAndSort(callback: (rowNode: RowNode)=>void) {
+        if (_.missing(this.inMemoryRowModel)) { console.log('cannot call forEachNodeAfterFilterAndSort unless using normal row model') }
+        this.inMemoryRowModel.forEachNodeAfterFilterAndSort(callback);
     }
 
     public getFilterApiForColDef(colDef:any) {
@@ -288,13 +355,22 @@ export class GridApi {
         return this.getFilterApi(colDef);
     }
 
-    public getFilterApi(key:any) {
-        var column = this.columnController.getColumn(key);
-        return this.filterManager.getFilterApi(column);
+    public getFilterApi(key: string|Column|ColDef) {
+        var column = this.columnController.getPrimaryColumn(key);
+        if (column) {
+            return this.filterManager.getFilterApi(column);
+        }
     }
 
-    public getColumnDef(key:any) {
-        var column = this.columnController.getColumn(key);
+    public destroyFilter(key: string|Column|ColDef) {
+        var column = this.columnController.getPrimaryColumn(key);
+        if (column) {
+            return this.filterManager.destroyFilter(column);
+        }
+    }
+    
+    public getColumnDef(key: string|Column|ColDef) {
+        var column = this.columnController.getPrimaryColumn(key);
         if (column) {
             return column.getColDef();
         } else {
@@ -303,15 +379,15 @@ export class GridApi {
     }
 
     public onFilterChanged() {
-        this.grid.onFilterChanged();
+        this.filterManager.onFilterChanged();
     }
 
     public setSortModel(sortModel:any) {
-        this.grid.setSortModel(sortModel);
+        this.sortController.setSortModel(sortModel);
     }
 
     public getSortModel() {
-        return this.grid.getSortModel();
+        return this.sortController.getSortModel();
     }
 
     public setFilterModel(model:any) {
@@ -319,36 +395,36 @@ export class GridApi {
     }
 
     public getFilterModel() {
-        return this.grid.getFilterModel();
+        return this.filterManager.getFilterModel();
     }
 
-    public getFocusedCell() {
-        return this.rowRenderer.getFocusedCell();
+    public getFocusedCell(): GridCell {
+        return this.focusedCellController.getFocusedCell();
     }
 
-    public setFocusedCell(rowIndex:any, colIndex:any) {
-        this.grid.setFocusedCell(rowIndex, colIndex);
+    public setFocusedCell(rowIndex: number, colKey: Column|ColDef|string, floating?: string) {
+        this.focusedCellController.setFocusedCell(rowIndex, colKey, floating, true);
     }
 
     public setHeaderHeight(headerHeight: number) {
         this.gridOptionsWrapper.setHeaderHeight(headerHeight);
-        this.gridPanel.onBodyHeightChange();
     }
 
     public showToolPanel(show:any) {
-        this.grid.showToolPanel(show);
+        this.gridCore.showToolPanel(show);
     }
 
     public isToolPanelShowing() {
-        return this.grid.isToolPanelShowing();
+        return this.gridCore.isToolPanelShowing();
     }
 
     public doLayout() {
-        this.grid.doLayout();
+        this.gridCore.doLayout();
     }
 
-    public getValue(colDef: ColDef, data: any, node: any): any {
-        return this.valueService.getValue(colDef, data, node);
+    public getValue(colKey: string|ColDef|Column, rowNode: RowNode): any {
+        var column = this.columnController.getPrimaryColumn(colKey);
+        return this.valueService.getValue(column, rowNode);
     }
 
     public addEventListener(eventType: string, listener: Function): void {
@@ -371,11 +447,89 @@ export class GridApi {
         this.eventService.dispatchEvent(eventType, event);
     }
 
-    public refreshRowGroup(): void {
-        this.grid.refreshRowGroup();
+    public destroy(): void {
+        this.context.destroy();
     }
 
-    public destroy(): void {
-        this.grid.destroy();
+    public resetQuickFilter(): void {
+        this.rowModel.forEachNode( node => node.quickFilterAggregateText = null);
     }
+
+    public getRangeSelections(): RangeSelection[] {
+        if (this.rangeController) {
+            return this.rangeController.getCellRanges();
+        } else {
+            console.warn('ag-Grid: cell range selection is only available in ag-Grid Enterprise');
+            return null;
+        }
+    }
+
+    public addRangeSelection(rangeSelection: AddRangeSelectionParams): void {
+        if (!this.rangeController) { console.warn('ag-Grid: cell range selection is only available in ag-Grid Enterprise'); }
+        this.rangeController.addRange(rangeSelection);
+    }
+
+    public clearRangeSelection(): void {
+        if (!this.rangeController) { console.warn('ag-Grid: cell range selection is only available in ag-Grid Enterprise'); }
+        this.rangeController.clearSelection();
+    }
+
+    public copySelectedRowsToClipboard(): void {
+        if (!this.clipboardService) { console.warn('ag-Grid: clipboard is only available in ag-Grid Enterprise'); }
+        this.clipboardService.copySelectedRowsToClipboard();
+    }
+
+    public copySelectedRangeToClipboard(): void {
+        if (!this.clipboardService) { console.warn('ag-Grid: clipboard is only available in ag-Grid Enterprise'); }
+        this.clipboardService.copySelectedRangeToClipboard();
+    }
+
+    public copySelectedRangeDown(): void {
+        if (!this.clipboardService) { console.warn('ag-Grid: clipboard is only available in ag-Grid Enterprise'); }
+        this.clipboardService.copyRangeDown();
+    }
+
+    public showColumnMenuAfterButtonClick(colKey: string|Column|ColDef, buttonElement: HTMLElement): void {
+        var column = this.columnController.getPrimaryColumn(colKey);
+        this.menuFactory.showMenuAfterButtonClick(column, buttonElement);
+    }
+
+    public showColumnMenuAfterMouseClick(colKey: string|Column|ColDef, mouseEvent: MouseEvent): void {
+        var column = this.columnController.getPrimaryColumn(colKey);
+        this.menuFactory.showMenuAfterMouseEvent(column, mouseEvent);
+    }
+
+    public stopEditing(cancel: boolean = false): void {
+        this.rowRenderer.stopEditing(cancel);
+    }
+
+    public addAggFunc(key: string, aggFunc: IAggFunc): void {
+        if (this.aggFuncService) {
+            this.aggFuncService.addAggFunc(key, aggFunc);
+        }
+    }
+
+    public addAggFuncs(aggFuncs: {[key: string]: IAggFunc}): void {
+        if (this.aggFuncService) {
+            this.aggFuncService.addAggFuncs(aggFuncs);
+        }
+    }
+
+    public clearAggFuncs(): void {
+        if (this.aggFuncService) {
+            this.aggFuncService.clear();
+        }
+    }
+
+    /*
+    Taking these out, as we want to reconsider how we register components
+    
+    public addCellRenderer(key: string, cellRenderer: {new(): ICellRenderer} | ICellRendererFunc): void {
+        this.cellRendererFactory.addCellRenderer(key, cellRenderer);
+    }
+    
+    public addCellEditor(key: string, cellEditor: {new(): ICellEditor}): void {
+        this.cellEditorFactory.addCellEditor(key, cellEditor);
+    }*/
+
 }

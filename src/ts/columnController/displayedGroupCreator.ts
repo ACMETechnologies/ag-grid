@@ -1,19 +1,19 @@
-import ColumnUtils from "./columnUtils";
-import Column from "../entities/column";
+import {ColumnUtils} from "./columnUtils";
+import {Column} from "../entities/column";
 import {OriginalColumnGroupChild} from "../entities/originalColumnGroupChild";
-import GroupInstanceIdCreator from "./groupInstanceIdCreator";
+import {GroupInstanceIdCreator} from "./groupInstanceIdCreator";
 import {ColumnGroupChild} from "../entities/columnGroupChild";
-import ColumnGroup from "../entities/columnGroup";
+import {ColumnGroup} from "../entities/columnGroup";
 import {OriginalColumnGroup} from "../entities/originalColumnGroup";
+import {Bean} from "../context/context";
+import {Qualifier} from "../context/context";
+import {Autowired} from "../context/context";
 
 // takes in a list of columns, as specified by the column definitions, and returns column groups
-export default class DisplayedGroupCreator {
+@Bean('displayedGroupCreator')
+export class DisplayedGroupCreator {
 
-    private columnUtils: ColumnUtils;
-
-    public init(columnUtils: ColumnUtils): void {
-        this.columnUtils = columnUtils;
-    }
+    @Autowired('columnUtils') private columnUtils: ColumnUtils;
 
     public createDisplayedGroups(sortedVisibleColumns: Column[],
                                  balancedColumnTree: OriginalColumnGroupChild[],
@@ -38,7 +38,7 @@ export default class DisplayedGroupCreator {
                     var originalGroup = currentOriginalPath[i];
                     var groupId = originalGroup.getGroupId();
                     var instanceId = groupInstanceIdCreator.getInstanceIdForKey(groupId);
-                    var newGroup = new ColumnGroup(originalGroup.getColGroupDef(), groupId, instanceId);
+                    var newGroup = new ColumnGroup(originalGroup, groupId, instanceId);
                     currentRealPath[i] = newGroup;
                     // if top level, add to result, otherwise add to parent
                     if (i==0) {
@@ -64,12 +64,6 @@ export default class DisplayedGroupCreator {
 
             previousRealPath = currentRealPath;
             previousOriginalPath = currentOriginalPath;
-        });
-
-        this.columnUtils.deptFirstAllColumnTreeSearch(result, (child: ColumnGroupChild)=> {
-            if (child instanceof ColumnGroup) {
-                (<ColumnGroup>child).calculateExpandable();
-            }
         });
 
         return result;

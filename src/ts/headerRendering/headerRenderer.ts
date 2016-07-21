@@ -1,155 +1,111 @@
-import _ from '../utils';
-import HeaderTemplateLoader from "./headerTemplateLoader";
-import GridOptionsWrapper from "../gridOptionsWrapper";
+import {GridOptionsWrapper} from "../gridOptionsWrapper";
 import {ColumnController} from "../columnController/columnController";
-import {Grid} from "../grid";
-import FilterManager from "../filter/filterManager";
-import RenderedHeaderElement from "./renderedHeaderElement";
-import GridPanel from "../gridPanel/gridPanel";
-import {ColumnGroupChild} from "../entities/columnGroupChild";
-import ColumnGroup from "../entities/columnGroup";
-import RenderedHeaderGroupCell from "./renderedHeaderGroupCell";
-import Column from "../entities/column";
-import RenderedHeaderCell from "./renderedHeaderCell";
+import {GridPanel} from "../gridPanel/gridPanel";
+import {Column} from "../entities/column";
+import {Bean, Autowired, Context, PostConstruct, PreDestroy} from "../context/context";
+import {HeaderContainer} from "./headerContainer";
+import {EventService} from "../eventService";
+import {Events} from "../events";
+import {IRenderedHeaderElement} from "./iRenderedHeaderElement";
 
-export default class HeaderRenderer {
+@Bean('headerRenderer')
+export class HeaderRenderer {
 
-    private headerTemplateLoader: HeaderTemplateLoader;
-    private gridOptionsWrapper: GridOptionsWrapper;
-    private columnController: ColumnController;
-    private angularGrid: Grid;
-    private filterManager: FilterManager;
-    private $scope: any;
-    private $compile: any;
-    private ePinnedLeftHeader: HTMLElement;
-    private ePinnedRightHeader: HTMLElement;
-    private eHeaderContainer: HTMLElement;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('gridPanel') private gridPanel: GridPanel;
+    @Autowired('context') private context: Context;
+    @Autowired('eventService') private eventService: EventService;
+
+    private pinnedLeftContainer: HeaderContainer;
+    private pinnedRightContainer: HeaderContainer;
+    private centerContainer: HeaderContainer;
+
+    private childContainers: HeaderContainer[];
+
     private eHeaderViewport: HTMLElement;
     private eRoot: HTMLElement;
+    private eHeaderOverlay: HTMLElement;
 
-    private headerElements: RenderedHeaderElement[] = [];
+    @PostConstruct
+    private init() {
+        this.eHeaderViewport = this.gridPanel.getHeaderViewport();
+        this.eRoot = this.gridPanel.getRoot();
+        this.eHeaderOverlay = this.gridPanel.getHeaderOverlay();
 
-    public init(gridOptionsWrapper: GridOptionsWrapper, columnController: ColumnController, gridPanel: GridPanel,
-                angularGrid: Grid, filterManager: FilterManager, $scope: any, $compile: any,
-                headerTemplateLoader: HeaderTemplateLoader) {
-        this.gridOptionsWrapper = gridOptionsWrapper;
-        this.columnController = columnController;
-        this.angularGrid = angularGrid;
-        this.filterManager = filterManager;
-        this.$scope = $scope;
-        this.$compile = $compile;
-        this.headerTemplateLoader = headerTemplateLoader;
-        this.findAllElements(gridPanel);
+        this.centerContainer = new HeaderContainer(this.gridPanel.getHeaderContainer(), this.gridPanel.getHeaderViewport(), this.eRoot, null);
+        this.childContainers = [this.centerContainer];
+
+        if (!this.gridOptionsWrapper.isForPrint()) {
+            this.pinnedLeftContainer = new HeaderContainer(this.gridPanel.getPinnedLeftHeader(), null, this.eRoot, Column.PINNED_LEFT);
+            this.pinnedRightContainer = new HeaderContainer(this.gridPanel.getPinnedRightHeader(), null, this.eRoot, Column.PINNED_RIGHT);
+            this.childContainers.push(this.pinnedLeftContainer);
+            this.childContainers.push(this.pinnedRightContainer);
+        }
+
+        this.childContainers.forEach( container => this.context.wireBean(container) );
+
+        // when grid columns change, it means the number of rows in the header has changed and it's all new columns
+        this.eventService.addEventListener(Events.EVENT_GRID_COLUMNS_CHANGED, this.onGridColumnsChanged.bind(this));
+
+        // shotgun way to get labels to change, eg from sum(amount) to avg(amount)
+        this.eventService.addEventListener(Events.EVENT_COLUMN_VALUE_CHANGED, this.refreshHeader.bind(this));
+
+        // for resized, the individual cells take care of this, so don't need to refresh everything
+        this.eventService.addEventListener(Events.EVENT_COLUMN_RESIZED, this.setPinnedColContainerWidth.bind(this));
+        this.eventService.addEventListener(Events.EVENT_DISPLAYED_COLUMNS_CHANGED, this.setPinnedColContainerWidth.bind(this));
+
+        if (this.columnController.isReady()) {
+            this.refreshHeader();
+        }
     }
 
-    private findAllElements(gridPanel: GridPanel) {
-        this.ePinnedLeftHeader = gridPanel.getPinnedLeftHeader();
-        this.ePinnedRightHeader = gridPanel.getPinnedRightHeader();
-        this.eHeaderContainer = gridPanel.getHeaderContainer();
-        this.eHeaderViewport = gridPanel.getHeaderViewport();
-        this.eRoot = gridPanel.getRoot();
+    public forEachHeaderElement(callback: (renderedHeaderElement: IRenderedHeaderElement)=>void): void {
+        this.childContainers.forEach( childContainer => childContainer.forEachHeaderElement(callback) );
+    }
+    
+    @PreDestroy
+    private destroy(): void {
+        this.childContainers.forEach( container => container.destroy() );
     }
 
+    private onGridColumnsChanged(): void {
+        this.setHeight();
+    }
+
+    // this is called from the API and refreshes everything, should be broken out
+    // into refresh everything vs just something changed
     public refreshHeader() {
-        _.removeAllChildren(this.ePinnedLeftHeader);
-        _.removeAllChildren(this.ePinnedRightHeader);
-        _.removeAllChildren(this.eHeaderContainer);
 
-        this.headerElements.forEach( (headerElement: RenderedHeaderElement) => {
-            headerElement.destroy();
-        });
-        this.headerElements = [];
+        this.setHeight();
 
-        this.insertHeaderRowsIntoContainer(this.columnController.getLeftDisplayedColumnGroups(), this.ePinnedLeftHeader);
-        this.insertHeaderRowsIntoContainer(this.columnController.getRightDisplayedColumnGroups(), this.ePinnedRightHeader);
-        this.insertHeaderRowsIntoContainer(this.columnController.getCenterDisplayedColumnGroups(), this.eHeaderContainer);
+        this.childContainers.forEach( container => container.refresh() );
+
+        this.setPinnedColContainerWidth();
     }
 
-    private addTreeNodesAtDept(cellTree: ColumnGroupChild[], dept: number, result: ColumnGroupChild[]): void {
-        cellTree.forEach( (abstractColumn) => {
-            if (dept===0) {
-                result.push(abstractColumn);
-            } else if (abstractColumn instanceof ColumnGroup) {
-                var columnGroup = <ColumnGroup> abstractColumn;
-                this.addTreeNodesAtDept(columnGroup.getDisplayedChildren(), dept-1, result);
-            } else {
-                // we are looking for children past a column, so have come to the end,
-                // do nothing, and because the tree is balanced, the result of this recursion
-                // will be an empty list.
-            }
-        });
+    private setHeight(): void {
+        // if forPrint, overlay is missing
+        if (this.eHeaderOverlay) {
+            var rowHeight = this.gridOptionsWrapper.getHeaderHeight();
+            // we can probably get rid of this when we no longer need the overlay
+            var dept = this.columnController.getHeaderRowCount();
+            this.eHeaderOverlay.style.height = rowHeight + 'px';
+            this.eHeaderOverlay.style.top = ((dept-1) * rowHeight) + 'px';
+        }
     }
-
+    
     public setPinnedColContainerWidth() {
-        if (this.gridOptionsWrapper.isForPrint()) {
-            // pinned col doesn't exist when doing forPrint
-            return;
-        }
+        // pinned col doesn't exist when doing forPrint
+        if (this.gridOptionsWrapper.isForPrint()) { return; }
 
-        var pinnedLeftWidth = this.columnController.getPinnedLeftContainerWidth() + 'px';
-        this.eHeaderViewport.style.marginLeft = pinnedLeftWidth;
+        var pinnedLeftWidth = this.columnController.getPinnedLeftContainerWidth();
+        this.eHeaderViewport.style.marginLeft = pinnedLeftWidth + 'px';
+        this.pinnedLeftContainer.setWidth(pinnedLeftWidth);
 
-        var pinnedRightWidth = this.columnController.getPinnedRightContainerWidth() + 'px';
-        this.eHeaderViewport.style.marginRight = pinnedRightWidth;
+        var pinnedRightWidth = this.columnController.getPinnedRightContainerWidth();
+        this.eHeaderViewport.style.marginRight = pinnedRightWidth + 'px';
+        this.pinnedRightContainer.setWidth(pinnedRightWidth);
     }
 
-    private insertHeaderRowsIntoContainer(cellTree: ColumnGroupChild[], eContainerToAddTo: HTMLElement): void {
-
-        // if we are displaying header groups, then we have many rows here.
-        // go through each row of the header, one by one.
-        for (var dept = 0; ; dept++) {
-
-            var nodesAtDept: ColumnGroupChild[] = [];
-            this.addTreeNodesAtDept(cellTree, dept, nodesAtDept);
-
-            // we want to break the for loop when we get to an empty set of cells,
-            // that's how we know we have finished rendering the last row.
-            if (nodesAtDept.length===0) {
-                break;
-            }
-
-            var eRow: HTMLElement = document.createElement('div');
-            eRow.className = 'ag-header-row';
-            eRow.style.top = (dept * this.gridOptionsWrapper.getHeaderHeight()) + 'px';
-            eRow.style.height = this.gridOptionsWrapper.getHeaderHeight() + 'px';
-
-            nodesAtDept.forEach( (child: ColumnGroupChild) => {
-                var renderedHeaderElement = this.createHeaderElement(child);
-                this.headerElements.push(renderedHeaderElement);
-                eRow.appendChild(renderedHeaderElement.getGui());
-            });
-
-            eContainerToAddTo.appendChild(eRow);
-        }
-    }
-
-    private createHeaderElement(columnGroupChild: ColumnGroupChild): RenderedHeaderElement {
-        if (columnGroupChild instanceof ColumnGroup) {
-            return new RenderedHeaderGroupCell(<ColumnGroup> columnGroupChild, this.gridOptionsWrapper,
-                this.columnController, this.eRoot, this.angularGrid, this.$scope,
-                this.filterManager, this.$compile);
-        } else {
-            return new RenderedHeaderCell(<Column> columnGroupChild, null, this.gridOptionsWrapper,
-                this.$scope, this.filterManager, this.columnController, this.$compile,
-                this.angularGrid, this.eRoot, this.headerTemplateLoader);
-        }
-    }
-
-    public updateSortIcons() {
-        this.headerElements.forEach( (headerElement: RenderedHeaderElement) => {
-            headerElement.refreshSortIcon();
-        });
-    }
-
-    public updateFilterIcons() {
-        this.headerElements.forEach( (headerElement: RenderedHeaderElement) => {
-            headerElement.refreshFilterIcon();
-        });
-    }
-
-    public onIndividualColumnResized(column: Column): void {
-        this.headerElements.forEach( (headerElement: RenderedHeaderElement) => {
-            headerElement.onIndividualColumnResized(column);
-        });
-    }
 }

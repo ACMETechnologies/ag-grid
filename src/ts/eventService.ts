@@ -1,9 +1,13 @@
 
 import {Logger} from "./logger";
 import {LoggerFactory} from "./logger";
-import _ from './utils';
+import {Utils as _} from './utils';
+import {Bean} from "./context/context";
+import {Qualifier} from "./context/context";
+import {IEventEmitter} from "./interfaces/iEventEmitter";
 
-export default class EventService {
+@Bean('eventService')
+export class EventService implements IEventEmitter {
 
     private allListeners: {[key: string]: Function[]} = {};
 
@@ -11,8 +15,15 @@ export default class EventService {
 
     private logger: Logger;
 
-    public init(loggerFactory: LoggerFactory) {
+    private static PRIORITY = '-P1';
+
+    public agWire(@Qualifier('loggerFactory') loggerFactory: LoggerFactory,
+                  @Qualifier('globalEventListener') globalEventListener: Function = null) {
         this.logger = loggerFactory.create('EventService');
+
+        if (globalEventListener) {
+            this.addGlobalListener(globalEventListener);
+        }
     }
 
     private getListenerList(eventType: string): Function[] {
@@ -29,6 +40,13 @@ export default class EventService {
         if (listenerList.indexOf(listener)<0) {
             listenerList.push(listener);
         }
+    }
+
+    // for some events, it's important that the model gets to hear about them before the view,
+    // as the model may need to update before the view works on the info. if you register
+    // via this method, you get notified before the view parts
+    public addModalPriorityEventListener(eventType: string, listener: Function): void {
+        this.addEventListener(eventType + EventService.PRIORITY, listener);
     }
 
     public addGlobalListener(listener: Function): void {
@@ -51,6 +69,13 @@ export default class EventService {
             event = {};
         }
         //this.logger.log('dispatching: ' + event);
+
+        // this allows the columnController to get events before anyone else
+        var p1ListenerList = this.getListenerList(eventType + EventService.PRIORITY);
+        p1ListenerList.forEach( (listener)=> {
+            listener(event);
+        });
+
         var listenerList = this.getListenerList(eventType);
         listenerList.forEach( (listener)=> {
             listener(event);

@@ -1,17 +1,19 @@
-import _ from '../utils';
-import SvgFactory from "../svgFactory";
-import GridOptionsWrapper from "../gridOptionsWrapper";
-import Column from "../entities/column";
+import {Utils as _} from "../utils";
+import {SvgFactory} from "../svgFactory";
+import {GridOptionsWrapper} from "../gridOptionsWrapper";
+import {Column} from "../entities/column";
+import {Bean, Autowired} from "../context/context";
 
 var svgFactory = SvgFactory.getInstance();
 
-export default class HeaderTemplateLoader {
+@Bean('headerTemplateLoader')
+export class HeaderTemplateLoader {
 
     private static HEADER_CELL_TEMPLATE =
         '<div class="ag-header-cell">' +
         '  <div id="agResizeBar" class="ag-header-cell-resize"></div>' +
         '  <span id="agMenu" class="ag-header-icon ag-header-cell-menu-button"></span>' +
-        '  <div class="ag-header-cell-label">' +
+        '  <div id="agHeaderCellLabel" class="ag-header-cell-label">' +
         '    <span id="agSortAsc" class="ag-header-icon ag-sort-ascending-icon"></span>' +
         '    <span id="agSortDesc" class="ag-header-icon ag-sort-descending-icon"></span>' +
         '    <span id="agNoSort" class="ag-header-icon ag-sort-none-icon"></span>' +
@@ -20,11 +22,7 @@ export default class HeaderTemplateLoader {
         '  </div>' +
         '</div>';
 
-    private gridOptionsWrapper: GridOptionsWrapper;
-
-    public init(gridOptionsWrapper: GridOptionsWrapper): void {
-        this.gridOptionsWrapper = gridOptionsWrapper;
-    }
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
 
     public createHeaderElement(column: Column): HTMLElement {
 
@@ -37,7 +35,7 @@ export default class HeaderTemplateLoader {
 
         // option 1 - see if user provided a template in colDef
         var userProvidedTemplate = column.getColDef().headerCellTemplate;
-        if (typeof userProvidedTemplate === 'function') { // and if they did, and it's a funciton, execute it
+        if (typeof userProvidedTemplate === 'function') { // and if they did, and it's a function, execute it
             var colDefFunc = (<(params: any) => string> userProvidedTemplate);
             userProvidedTemplate = colDefFunc(params);
         }
@@ -81,7 +79,7 @@ export default class HeaderTemplateLoader {
         return eTemplate;
     }
 
-    private addInIcon(eTemplate: HTMLElement, iconName: string, cssSelector: string, column: Column, defaultIconFactory: () => Node): void {
+    private addInIcon(eTemplate: HTMLElement, iconName: string, cssSelector: string, column: Column, defaultIconFactory: () => HTMLElement): void {
         var eIcon = _.createIconNoSpan(iconName, this.gridOptionsWrapper, column, defaultIconFactory);
         eTemplate.querySelector(cssSelector).appendChild(eIcon);
     }

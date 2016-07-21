@@ -1,30 +1,38 @@
-import InMemoryRowController from "./rowControllers/inMemoryRowController";
 import {ColumnController} from "./columnController/columnController";
-import {Grid} from "./grid";
-import ValueService from "./valueService";
-import Column from "./entities/column";
+import {ValueService} from "./valueService";
+import {Column} from "./entities/column";
 import {RowNode} from "./entities/rowNode";
+import {Bean, Autowired} from "./context/context";
+import {IRowModel} from "./interfaces/iRowModel";
+import {GridOptionsWrapper} from "./gridOptionsWrapper";
+import {ProcessCellForExportParams, ProcessHeaderForExportParams} from "./entities/gridOptions";
+import {Constants} from "./constants";
+import {IInMemoryRowModel} from "./interfaces/iInMemoryRowModel";
+
 var LINE_SEPARATOR = '\r\n';
 
 export interface CsvExportParams {
     skipHeader?: boolean;
     skipFooters?: boolean;
     skipGroups?: boolean;
+    suppressQuotes?: boolean;
     fileName?: string;
     customHeader?: string;
     customFooter?: string;
     allColumns?: boolean;
     columnSeparator?: string;
+    onlySelected?: boolean;
+    processCellCallback?(params: ProcessCellForExportParams): void;
+    processHeaderCallback?(params: ProcessHeaderForExportParams): string;
 }
 
-export default class CsvCreator {
+@Bean('csvCreator')
+export class CsvCreator {
 
-    constructor(
-        private rowController: InMemoryRowController,
-        private columnController: ColumnController,
-        private grid: Grid,
-        private valueService: ValueService) {
-    }
+    @Autowired('rowModel') private rowModel: IRowModel;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('valueService') private valueService: ValueService;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
 
     public exportDataAsCsv(params?: CsvExportParams): void {
         var csvString = this.getDataAsCsv(params);
@@ -51,11 +59,13 @@ export default class CsvCreator {
     }
 
     public getDataAsCsv(params?: CsvExportParams): string {
-        if (!this.grid.isUsingInMemoryModel()) {
-            console.log('ag-Grid: getDataAsCsv not available when doing virtual pagination');
+        if (this.rowModel.getType()!==Constants.ROW_MODEL_TYPE_NORMAL) {
+            console.log('ag-Grid: getDataAsCsv is only available for standard row model');
             return '';
         }
+        var inMemoryRowModel = <IInMemoryRowModel> this.rowModel;
 
+        var that = this;
         var result = '';
 
         var skipGroups = params && params.skipGroups;
@@ -64,11 +74,19 @@ export default class CsvCreator {
         var includeCustomHeader = params && params.customHeader;
         var includeCustomFooter = params && params.customFooter;
         var allColumns = params && params.allColumns;
+        var onlySelected = params && params.onlySelected;
         var columnSeparator = (params && params.columnSeparator) || ',';
+        var suppressQuotes = params && params.suppressQuotes;
+        var processCellCallback = params && params.processCellCallback;
+        var processHeaderCallback = params && params.processHeaderCallback;
+
+        // when in pivot mode, we always render cols on screen, never 'all columns'
+        var isPivotMode = this.columnController.isPivotMode();
+        var isRowGrouping = this.columnController.getRowGroupColumns().length > 0;
 
         var columnsToExport: Column[];
-        if (allColumns) {
-            columnsToExport = this.columnController.getAllColumns();
+        if (allColumns && !isPivotMode) {
+            columnsToExport = this.columnController.getAllPrimaryColumns();
         } else {
             columnsToExport = this.columnController.getAllDisplayedColumns();
         }
@@ -83,48 +101,92 @@ export default class CsvCreator {
 
         // first pass, put in the header names of the cols
         if (!skipHeader) {
-            columnsToExport.forEach( (column: Column, index: number)=> {
-                var nameForCol = this.columnController.getDisplayNameForCol(column);
-                if (nameForCol === null || nameForCol === undefined) {
-                    nameForCol = '';
-                }
-                if (index != 0) {
-                    result += columnSeparator;
-                }
-                result += '"' + this.escape(nameForCol) + '"';
-            });
+            columnsToExport.forEach(processHeaderColumn);
             result += LINE_SEPARATOR;
         }
 
-        this.rowController.forEachNodeAfterFilterAndSort( (node: RowNode) => {
+        if (isPivotMode) {
+            inMemoryRowModel.forEachPivotNode(processRow);
+        } else {
+            inMemoryRowModel.forEachNodeAfterFilterAndSort(processRow);
+        }
+
+        if (includeCustomFooter) {
+            result += params.customFooter;
+        }
+
+        function processRow(node: RowNode): void {
             if (skipGroups && node.group) { return; }
 
             if (skipFooters && node.footer) { return; }
 
+            if (onlySelected && !node.isSelected()) { return; }
+
+            // if we are in pivotMode, then the grid will show the root node only
+            // if it's not a leaf group
+            var nodeIsRootNode = node.level===-1;
+            if (nodeIsRootNode && !node.leafGroup) { return; }
+
             columnsToExport.forEach( (column: Column, index: number)=> {
                 var valueForCell: any;
-                if (node.group && index === 0) {
-                    valueForCell =  this.createValueForGroupNode(node);
+                if (node.group && isRowGrouping && index === 0) {
+                    valueForCell =  that.createValueForGroupNode(node);
                 } else {
-                    valueForCell =  this.valueService.getValue(column.getColDef(), node.data, node);
+                    valueForCell =  that.valueService.getValue(column, node);
                 }
+                valueForCell = that.processCell(node, column, valueForCell, processCellCallback);
                 if (valueForCell === null || valueForCell === undefined) {
                     valueForCell = '';
                 }
                 if (index != 0) {
                     result += columnSeparator;
                 }
-                result += '"' + this.escape(valueForCell) + '"';
+                result += that.putInQuotes(valueForCell, suppressQuotes);
             });
 
             result += LINE_SEPARATOR;
-        });
+        }
 
-        if (includeCustomFooter) {
-            result += params.customFooter;
+        function processHeaderColumn(column: Column, index: number): void {
+            var nameForCol = that.getHeaderName(processHeaderCallback, column);
+            if (nameForCol === null || nameForCol === undefined) {
+                nameForCol = '';
+            }
+            if (index != 0) {
+                result += columnSeparator;
+            }
+            result += that.putInQuotes(nameForCol, suppressQuotes);
         }
 
         return result;
+    }
+
+    private getHeaderName(callback: (params: ProcessHeaderForExportParams)=>string, column: Column): string {
+        if (callback) {
+            return callback({
+                column: column,
+                api: this.gridOptionsWrapper.getApi(),
+                columnApi: this.gridOptionsWrapper.getColumnApi(),
+                context: this.gridOptionsWrapper.getContext()
+            });
+        } else {
+            return this.columnController.getDisplayNameForCol(column, true);
+        }
+    }
+
+    private processCell(rowNode: RowNode, column: Column, value: any, processCellCallback:(params: ProcessCellForExportParams)=>void): any {
+        if (processCellCallback) {
+            return processCellCallback({
+                column: column,
+                node: rowNode,
+                value: value,
+                api: this.gridOptionsWrapper.getApi(),
+                columnApi: this.gridOptionsWrapper.getColumnApi(),
+                context: this.gridOptionsWrapper.getContext()
+            });
+        } else {
+            return value;
+        }
     }
 
     private createValueForGroupNode(node: RowNode): string {
@@ -136,10 +198,11 @@ export default class CsvCreator {
         return keys.reverse().join(' -> ');
     }
 
-    // replace each " with "" (ie two sets of double quotes is how to do double quotes in csv)
-    private escape(value: any): string {
+    private putInQuotes(value: any, suppressQuotes: boolean): string {
+        if (suppressQuotes) { return value; }
+
         if (value === null || value === undefined) {
-            return '';
+            return '""';
         }
 
         var stringValue: string;
@@ -148,11 +211,14 @@ export default class CsvCreator {
         } else if (typeof value.toString === 'function') {
             stringValue = value.toString();
         } else {
-            console.warn('known value type during csv conversio');
+            console.warn('unknown value type during csv conversion');
             stringValue = '';
         }
 
-        return stringValue.replace(/"/g, "\"\"");
+        // replace each " with "" (ie two sets of double quotes is how to do double quotes in csv)
+        var valueEscaped = stringValue.replace(/"/g, "\"\"");
+
+        return '"' + valueEscaped + '"';
     }
 
 }

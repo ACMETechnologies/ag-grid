@@ -1,45 +1,55 @@
-import _ from '../utils';
-import GridOptionsWrapper from "../gridOptionsWrapper";
-import {Grid} from "../grid";
-import SelectionRendererFactory from "../selectionRendererFactory";
-import GridPanel from "../gridPanel/gridPanel";
-import SelectionController from "../selectionController";
-import ExpressionService from "../expressionService";
-import TemplateService from "../templateService";
-import ValueService from "../valueService";
-import EventService from "../eventService";
-import FloatingRowModel from "../rowControllers/floatingRowModel";
-import RenderedRow from "./renderedRow";
-import groupCellRendererFactory from "../cellRenderers/groupCellRendererFactory";
-import Column from "../entities/column";
+import {Utils as _} from "../utils";
+import {GridOptionsWrapper} from "../gridOptionsWrapper";
+import {GridPanel} from "../gridPanel/gridPanel";
+import {ExpressionService} from "../expressionService";
+import {TemplateService} from "../templateService";
+import {ValueService} from "../valueService";
+import {EventService} from "../eventService";
+import {FloatingRowModel} from "../rowControllers/floatingRowModel";
+import {RenderedRow} from "./renderedRow";
+import {Column} from "../entities/column";
 import {RowNode} from "../entities/rowNode";
 import {Events} from "../events";
-import Constants from "../constants";
-import {ColDef} from "../entities/colDef";
-import RenderedCell from "./renderedCell";
+import {Constants} from "../constants";
+import {RenderedCell} from "./renderedCell";
+import {Bean, PreDestroy, Qualifier, Context, Autowired, PostConstruct, Optional} from "../context/context";
+import {GridCore} from "../gridCore";
+import {ColumnController} from "../columnController/columnController";
+import {Logger, LoggerFactory} from "../logger";
+import {ColumnChangeEvent} from "../columnChangeEvent";
+import {IRowModel} from "../interfaces/iRowModel";
+import {FocusedCellController} from "../focusedCellController";
+import {IRangeController} from "../interfaces/iRangeController";
+import {CellNavigationService} from "../cellNavigationService";
+import {GridCell} from "../entities/gridCell";
 
-export default class RowRenderer {
+@Bean('rowRenderer')
+export class RowRenderer {
 
-    private columnModel: any;
-    private gridOptionsWrapper: GridOptionsWrapper;
-    private angularGrid: Grid;
-    private selectionRendererFactory: SelectionRendererFactory;
-    private gridPanel: GridPanel;
-    private $compile: any;
-    private $scope: any;
-    private selectionController: SelectionController;
-    private expressionService: ExpressionService;
-    private templateService: TemplateService;
-    private cellRendererMap: {[key: string]: any};
-    private rowModel: any;
-    private firstVirtualRenderedRow: number;
-    private lastVirtualRenderedRow: number;
-    private focusedCell: any;
-    private valueService: ValueService;
-    private eventService: EventService;
-    private floatingRowModel: FloatingRowModel;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('gridCore') private gridCore: GridCore;
+    @Autowired('gridPanel') private gridPanel: GridPanel;
+    @Autowired('$compile') private $compile: any;
+    @Autowired('$scope') private $scope: any;
+    @Autowired('expressionService') private expressionService: ExpressionService;
+    @Autowired('templateService') private templateService: TemplateService;
+    @Autowired('valueService') private valueService: ValueService;
+    @Autowired('eventService') private eventService: EventService;
+    @Autowired('floatingRowModel') private floatingRowModel: FloatingRowModel;
+    @Autowired('context') private context: Context;
+    @Autowired('loggerFactory') private loggerFactory: LoggerFactory;
+    @Autowired('rowModel') private rowModel: IRowModel;
+    @Autowired('focusedCellController') private focusedCellController: FocusedCellController;
+    @Optional('rangeController') private rangeController: IRangeController;
+    @Autowired('cellNavigationService') private cellNavigationService: CellNavigationService;
 
-    private renderedRows: {[key: string]: RenderedRow};
+    private firstRenderedRow: number;
+    private lastRenderedRow: number;
+
+    // map of row ids to row objects. keeps track of which elements
+    // are rendered for which rows in the dom.
+    private renderedRows: {[key: string]: RenderedRow} = {};
     private renderedTopFloatingRows: RenderedRow[] = [];
     private renderedBottomFloatingRows: RenderedRow[] = [];
 
@@ -57,38 +67,69 @@ export default class RowRenderer {
     private eFloatingBottomContainer: HTMLElement;
     private eFloatingBottomPinnedLeftContainer: HTMLElement;
     private eFloatingBottomPinnedRightContainer: HTMLElement;
-    private eParentsOfRows: HTMLElement[];
 
-    public init(columnModel: any, gridOptionsWrapper: GridOptionsWrapper, gridPanel: GridPanel,
-                angularGrid: Grid, selectionRendererFactory: SelectionRendererFactory, $compile: any, $scope: any,
-                selectionController: SelectionController, expressionService: ExpressionService,
-                templateService: TemplateService, valueService: ValueService, eventService: EventService,
-                floatingRowModel: FloatingRowModel) {
-        this.columnModel = columnModel;
-        this.gridOptionsWrapper = gridOptionsWrapper;
-        this.angularGrid = angularGrid;
-        this.selectionRendererFactory = selectionRendererFactory;
-        this.gridPanel = gridPanel;
-        this.$compile = $compile;
-        this.$scope = $scope;
-        this.selectionController = selectionController;
-        this.expressionService = expressionService;
-        this.templateService = templateService;
-        this.valueService = valueService;
-        this.findAllElements(gridPanel);
-        this.eventService = eventService;
-        this.floatingRowModel = floatingRowModel;
+    private logger: Logger;
 
-        this.cellRendererMap = {
-            'group': groupCellRendererFactory(gridOptionsWrapper, selectionRendererFactory, expressionService, eventService),
-            'default': function(params: any) {
-                return params.value;
-            }
-        };
+    private destroyFunctions: Function[] = [];
 
-        // map of row ids to row objects. keeps track of which elements
-        // are rendered for which rows in the dom.
-        this.renderedRows = {};
+    public agWire(@Qualifier('loggerFactory') loggerFactory: LoggerFactory) {
+        this.logger = this.loggerFactory.create('RowRenderer');
+        this.logger = loggerFactory.create('BalancedColumnTreeBuilder');
+    }
+
+    @PostConstruct
+    public init(): void {
+        this.getContainersFromGridPanel();
+        
+        var columnListener = this.onColumnEvent.bind(this);
+        var refreshViewListener = this.refreshView.bind(this);
+
+        this.eventService.addEventListener(Events.EVENT_DISPLAYED_COLUMNS_CHANGED, columnListener);
+        this.eventService.addEventListener(Events.EVENT_COLUMN_RESIZED, columnListener);
+        
+        this.eventService.addEventListener(Events.EVENT_MODEL_UPDATED, refreshViewListener);
+        this.eventService.addEventListener(Events.EVENT_FLOATING_ROW_DATA_CHANGED, refreshViewListener);
+
+        this.destroyFunctions.push( () => {
+            this.eventService.removeEventListener(Events.EVENT_DISPLAYED_COLUMNS_CHANGED, columnListener);
+            this.eventService.removeEventListener(Events.EVENT_COLUMN_RESIZED, columnListener);
+
+            this.eventService.removeEventListener(Events.EVENT_MODEL_UPDATED, refreshViewListener);
+            this.eventService.removeEventListener(Events.EVENT_FLOATING_ROW_DATA_CHANGED, refreshViewListener);
+        });
+
+        this.refreshView();
+    }
+
+    public onColumnEvent(event: ColumnChangeEvent): void {
+        this.setMainRowWidths();
+    }
+
+    public getContainersFromGridPanel(): void {
+        this.eBodyContainer = this.gridPanel.getBodyContainer();
+        this.ePinnedLeftColsContainer = this.gridPanel.getPinnedLeftColsContainer();
+        this.ePinnedRightColsContainer = this.gridPanel.getPinnedRightColsContainer();
+
+        this.eFloatingTopContainer = this.gridPanel.getFloatingTopContainer();
+        this.eFloatingTopPinnedLeftContainer = this.gridPanel.getPinnedLeftFloatingTop();
+        this.eFloatingTopPinnedRightContainer = this.gridPanel.getPinnedRightFloatingTop();
+
+        this.eFloatingBottomContainer = this.gridPanel.getFloatingBottomContainer();
+        this.eFloatingBottomPinnedLeftContainer = this.gridPanel.getPinnedLeftFloatingBottom();
+        this.eFloatingBottomPinnedRightContainer = this.gridPanel.getPinnedRightFloatingBottom();
+
+        this.eBodyViewport = this.gridPanel.getBodyViewport();
+
+        this.eAllBodyContainers = [this.eBodyContainer, this.eFloatingBottomContainer,
+            this.eFloatingTopContainer];
+        this.eAllPinnedLeftContainers = [
+            this.ePinnedLeftColsContainer,
+            this.eFloatingBottomPinnedLeftContainer,
+            this.eFloatingTopPinnedLeftContainer];
+        this.eAllPinnedRightContainers = [
+            this.ePinnedRightColsContainer,
+            this.eFloatingBottomPinnedRightContainer,
+            this.eFloatingTopPinnedRightContainer];
     }
 
     public setRowModel(rowModel: any) {
@@ -112,20 +153,8 @@ export default class RowRenderer {
         return eCells;
     }
 
-    public onIndividualColumnResized(column: Column) {
-        var newWidthPx = column.getActualWidth() + "px";
-        var selectorForAllColsInCell = ".cell-col-" + column.getIndex();
-        this.eParentsOfRows.forEach( function(rowContainer: HTMLElement) {
-            var cellsForThisCol: NodeListOf<Element> = rowContainer.querySelectorAll(selectorForAllColsInCell);
-            for (var i = 0; i < cellsForThisCol.length; i++) {
-                var element = <HTMLElement> cellsForThisCol[i];
-                element.style.width = newWidthPx;
-            }
-        });
-    }
-
     public setMainRowWidths() {
-        var mainRowWidth = this.columnModel.getBodyContainerWidth() + "px";
+        var mainRowWidth = this.columnController.getBodyContainerWidth() + "px";
 
         this.eAllBodyContainers.forEach( function(container: HTMLElement) {
             var unpinnedRows: [any] = (<any>container).querySelectorAll(".ag-row");
@@ -133,34 +162,6 @@ export default class RowRenderer {
                 unpinnedRows[i].style.width = mainRowWidth;
             }
         });
-    }
-
-    private findAllElements(gridPanel: any) {
-        this.eBodyContainer = gridPanel.getBodyContainer();
-        this.ePinnedLeftColsContainer = gridPanel.getPinnedLeftColsContainer();
-        this.ePinnedRightColsContainer = gridPanel.getPinnedRightColsContainer();
-
-        this.eFloatingTopContainer = gridPanel.getFloatingTopContainer();
-        this.eFloatingTopPinnedLeftContainer = gridPanel.getPinnedLeftFloatingTop();
-        this.eFloatingTopPinnedRightContainer = gridPanel.getPinnedRightFloatingTop();
-
-        this.eFloatingBottomContainer = gridPanel.getFloatingBottomContainer();
-        this.eFloatingBottomPinnedLeftContainer = gridPanel.getPinnedLeftFloatingBottom();
-        this.eFloatingBottomPinnedRightContainer = gridPanel.getPinnedRightFloatingBottom();
-
-        this.eBodyViewport = gridPanel.getBodyViewport();
-        this.eParentsOfRows = gridPanel.getRowsParent();
-
-        this.eAllBodyContainers = [this.eBodyContainer, this.eFloatingBottomContainer,
-            this.eFloatingTopContainer];
-        this.eAllPinnedLeftContainers = [
-            this.ePinnedLeftColsContainer,
-            this.eFloatingBottomPinnedLeftContainer,
-            this.eFloatingTopPinnedLeftContainer];
-        this.eAllPinnedRightContainers = [
-            this.ePinnedRightColsContainer,
-            this.eFloatingBottomPinnedRightContainer,
-            this.eFloatingTopPinnedRightContainer];
     }
 
     public refreshAllFloatingRows(): void {
@@ -188,30 +189,32 @@ export default class RowRenderer {
         renderedRows.length = 0;
 
         // if no cols, don't draw row - can we get rid of this???
-        var columns = this.columnModel.getAllDisplayedColumns();
-        if (!columns || columns.length == 0) {
-            return;
-        }
-
-        // should we be storing this somewhere???
-        var mainRowWidth = this.columnModel.getBodyContainerWidth();
+        var columns = this.columnController.getAllDisplayedColumns();
+        if (_.missingOrEmpty(columns)) { return; }
 
         if (rowNodes) {
             rowNodes.forEach( (node: RowNode, rowIndex: number) => {
-                var renderedRow = new RenderedRow(this.gridOptionsWrapper, this.valueService, this.$scope,
-                    this.angularGrid, this.columnModel, this.expressionService, this.cellRendererMap,
-                    this.selectionRendererFactory, this.$compile, this.templateService,
-                    this.selectionController, this, bodyContainer, pinnedLeftContainer, pinnedRightContainer,
-                    node, rowIndex, this.eventService);
-                renderedRow.setMainRowWidth(mainRowWidth);
+                var renderedRow = new RenderedRow(this.$scope,
+                    this,
+                    bodyContainer,
+                    pinnedLeftContainer,
+                    pinnedRightContainer,
+                    node, rowIndex);
+                this.context.wireBean(renderedRow);
                 renderedRows.push(renderedRow);
             })
         }
     }
 
-    public refreshView(refreshFromIndex?: any) {
+    public refreshView(refreshEvent?: any) {
+        this.logger.log('refreshView');
+
+        var focusedCell = this.focusedCellController.getFocusCellToUseAfterRefresh();
+
+        var refreshFromIndex: number = refreshEvent ? refreshEvent.fromIndex : null;
+
         if (!this.gridOptionsWrapper.isForPrint()) {
-            var containerHeight = this.rowModel.getVirtualRowCombinedHeight();
+            var containerHeight = this.rowModel.getRowCombinedHeight();
             this.eBodyContainer.style.height = containerHeight + "px";
             this.ePinnedLeftColsContainer.style.height = containerHeight + "px";
             this.ePinnedRightColsContainer.style.height = containerHeight + "px";
@@ -219,18 +222,62 @@ export default class RowRenderer {
 
         this.refreshAllVirtualRows(refreshFromIndex);
         this.refreshAllFloatingRows();
+
+        this.restoreFocusedCell(focusedCell);
+    }
+
+    // sets the focus to the provided cell, if the cell is provided. this way, the user can call refresh without
+    // worry about the focus been lost. this is important when the user is using keyboard navigation to do edits
+    // and the cellEditor is calling 'refresh' to get other cells to update (as other cells might depend on the
+    // edited cell).
+    private restoreFocusedCell(gridCell: GridCell): void {
+        if (gridCell) {
+            this.focusedCellController.setFocusedCell(gridCell.rowIndex, gridCell.column, gridCell.floating, true);
+        }
     }
 
     public softRefreshView() {
-        _.iterateObject(this.renderedRows, (key: any, renderedRow: RenderedRow)=> {
-            renderedRow.softRefresh();
+        var focusedCell = this.focusedCellController.getFocusCellToUseAfterRefresh();
+
+        this.forEachRenderedCell( renderedCell => {
+            if (renderedCell.isVolatile()) {
+                renderedCell.refreshCell();
+            }
         });
+
+        this.restoreFocusedCell(focusedCell);
+    }
+
+    public stopEditing(cancel: boolean = false) {
+        this.forEachRenderedCell( renderedCell => {
+            renderedCell.stopEditing(cancel);
+        });
+    }
+    
+    public forEachRenderedCell(callback: (renderedCell: RenderedCell)=>void): void {
+        _.iterateObject(this.renderedRows, (key: any, renderedRow: RenderedRow)=> {
+            renderedRow.forEachRenderedCell(callback);
+        });
+    }
+
+    private forEachRenderedRow(callback: (key: string, renderedCell: RenderedRow)=>void): void {
+        _.iterateObject(this.renderedRows, callback);
+        _.iterateObject(this.renderedTopFloatingRows, callback);
+        _.iterateObject(this.renderedBottomFloatingRows, callback);
+    }
+
+    public addRenderedRowListener(eventName: string, rowIndex: number, callback: Function): void {
+        var renderedRow = this.renderedRows[rowIndex];
+        renderedRow.addEventListener(eventName, callback);
     }
 
     public refreshRows(rowNodes: RowNode[]): void {
         if (!rowNodes || rowNodes.length==0) {
             return;
         }
+
+        var focusedCell = this.focusedCellController.getFocusCellToUseAfterRefresh();
+
         // we only need to be worried about rendered rows, as this method is
         // called to whats rendered. if the row isn't rendered, we don't care
         var indexesToRemove: any = [];
@@ -244,9 +291,11 @@ export default class RowRenderer {
         this.removeVirtualRow(indexesToRemove);
         // add draw them again
         this.drawVirtualRows();
+
+        this.restoreFocusedCell(focusedCell);
     }
 
-    public refreshCells(rowNodes: RowNode[], colIds: string[]): void {
+    public refreshCells(rowNodes: RowNode[], colIds: string[], animate = false): void {
         if (!rowNodes || rowNodes.length==0) {
             return;
         }
@@ -255,7 +304,7 @@ export default class RowRenderer {
         _.iterateObject(this.renderedRows, (key: string, renderedRow: RenderedRow)=> {
             var rowNode = renderedRow.getRowNode();
             if (rowNodes.indexOf(rowNode)>=0) {
-                renderedRow.refreshCells(colIds);
+                renderedRow.refreshCells(colIds, animate);
             }
         });
     }
@@ -278,12 +327,15 @@ export default class RowRenderer {
         this.drawVirtualRows();
     }
 
-    public destroy() {
+    @PreDestroy
+    private destroy() {
+        this.destroyFunctions.forEach(func => func());
+
         var rowsToRemove = Object.keys(this.renderedRows);
         this.removeVirtualRow(rowsToRemove);
     }
 
-    private refreshAllVirtualRows(fromIndex: any) {
+    private refreshAllVirtualRows(fromIndex?: any) {
         // remove all current virtual rows, as they have old data
         var rowsToRemove = Object.keys(this.renderedRows);
         this.removeVirtualRow(rowsToRemove, fromIndex);
@@ -317,11 +369,6 @@ export default class RowRenderer {
         rowsToRemove.forEach(function (indexToRemove: any) {
             if (indexToRemove >= realFromIndex) {
                 that.unbindVirtualRow(indexToRemove);
-
-                // if the row was last to have focus, we remove the fact that it has focus
-                if (that.focusedCell && that.focusedCell.rowIndex == indexToRemove) {
-                    that.focusedCell = null;
-                }
             }
         });
     }
@@ -332,7 +379,6 @@ export default class RowRenderer {
 
         var event = {node: renderedRow.getRowNode(), rowIndex: indexToRemove};
         this.eventService.dispatchEvent(Events.EVENT_VIRTUAL_ROW_REMOVED, event);
-        this.angularGrid.onVirtualRowRemoved(indexToRemove);
 
         delete this.renderedRows[indexToRemove];
     }
@@ -344,73 +390,81 @@ export default class RowRenderer {
 
     public workOutFirstAndLastRowsToRender(): void {
 
-        var rowCount = this.rowModel.getVirtualRowCount();
+        var newFirst: number;
+        var newLast: number;
 
-        if (rowCount===0) {
-            this.firstVirtualRenderedRow = 0;
-            this.lastVirtualRenderedRow = -1; // setting to -1 means nothing in range
-            return;
-        }
-
-        if (this.gridOptionsWrapper.isForPrint()) {
-            this.firstVirtualRenderedRow = 0;
-            this.lastVirtualRenderedRow = rowCount;
+        if (!this.rowModel.isRowsToRender()) {
+            newFirst = 0;
+            newLast = -1; // setting to -1 means nothing in range
         } else {
+            var rowCount = this.rowModel.getRowCount();
 
-            var topPixel = this.eBodyViewport.scrollTop;
-            var bottomPixel = topPixel + this.eBodyViewport.offsetHeight;
+            if (this.gridOptionsWrapper.isForPrint()) {
+                newFirst = 0;
+                newLast = rowCount;
+            } else {
 
-            var first = this.rowModel.getRowAtPixel(topPixel);
-            var last = this.rowModel.getRowAtPixel(bottomPixel);
+                var topPixel = this.eBodyViewport.scrollTop;
+                var bottomPixel = topPixel + this.eBodyViewport.offsetHeight;
 
-            //add in buffer
-            var buffer = this.gridOptionsWrapper.getRowBuffer();
-            first = first - buffer;
-            last = last + buffer;
+                var first = this.rowModel.getRowIndexAtPixel(topPixel);
+                var last = this.rowModel.getRowIndexAtPixel(bottomPixel);
 
-            // adjust, in case buffer extended actual size
-            if (first < 0) {
-                first = 0;
+                //add in buffer
+                var buffer = this.gridOptionsWrapper.getRowBuffer();
+                first = first - buffer;
+                last = last + buffer;
+
+                // adjust, in case buffer extended actual size
+                if (first < 0) {
+                    first = 0;
+                }
+                if (last > rowCount - 1) {
+                    last = rowCount - 1;
+                }
+
+                newFirst = first;
+                newLast = last;
             }
-            if (last > rowCount - 1) {
-                last = rowCount - 1;
-            }
-
-            this.firstVirtualRenderedRow = first;
-            this.lastVirtualRenderedRow = last;
         }
 
+        var firstDiffers = newFirst !== this.firstRenderedRow;
+        var lastDiffers = newLast !== this.lastRenderedRow;
+        if (firstDiffers || lastDiffers) {
+            this.firstRenderedRow = newFirst;
+            this.lastRenderedRow = newLast;
+
+            var event = {firstRow: newFirst, lastRow: newLast};
+            this.eventService.dispatchEvent(Events.EVENT_VIEWPORT_CHANGED, event);
+        }
     }
 
     public getFirstVirtualRenderedRow() {
-        return this.firstVirtualRenderedRow;
+        return this.firstRenderedRow;
     }
 
     public getLastVirtualRenderedRow() {
-        return this.lastVirtualRenderedRow;
+        return this.lastRenderedRow;
     }
 
     private ensureRowsRendered() {
 
         //var start = new Date().getTime();
 
-        var mainRowWidth = this.columnModel.getBodyContainerWidth();
-        var that = this;
-
         // at the end, this array will contain the items we need to remove
         var rowsToRemove = Object.keys(this.renderedRows);
 
         // add in new rows
-        for (var rowIndex = this.firstVirtualRenderedRow; rowIndex <= this.lastVirtualRenderedRow; rowIndex++) {
+        for (var rowIndex = this.firstRenderedRow; rowIndex <= this.lastRenderedRow; rowIndex++) {
             // see if item already there, and if yes, take it out of the 'to remove' array
             if (rowsToRemove.indexOf(rowIndex.toString()) >= 0) {
                 rowsToRemove.splice(rowsToRemove.indexOf(rowIndex.toString()), 1);
                 continue;
             }
             // check this row actually exists (in case overflow buffer window exceeds real data)
-            var node = this.rowModel.getVirtualRow(rowIndex);
+            var node = this.rowModel.getRow(rowIndex);
             if (node) {
-                that.insertRow(node, rowIndex, mainRowWidth);
+                this.insertRow(node, rowIndex);
             }
         }
 
@@ -420,28 +474,40 @@ export default class RowRenderer {
         // if we are doing angular compiling, then do digest the scope here
         if (this.gridOptionsWrapper.isAngularCompileRows()) {
             // we do it in a timeout, in case we are already in an apply
-            setTimeout(function () {
-                that.$scope.$apply();
-            }, 0);
+            setTimeout( () => { this.$scope.$apply(); }, 0);
         }
 
         //var end = new Date().getTime();
         //console.log(end-start);
     }
 
-    private insertRow(node: any, rowIndex: any, mainRowWidth: any) {
-        var columns = this.columnModel.getAllDisplayedColumns();
-        // if no cols, don't draw row
-        if (!columns || columns.length == 0) {
-            return;
+    public onMouseEvent(eventName: string, mouseEvent: MouseEvent, eventSource: HTMLElement, cell: GridCell): void {
+        var renderedRow: RenderedRow;
+        switch (cell.floating) {
+            case Constants.FLOATING_TOP:
+                renderedRow = this.renderedTopFloatingRows[cell.rowIndex];
+                break;
+            case Constants.FLOATING_BOTTOM:
+                renderedRow = this.renderedBottomFloatingRows[cell.rowIndex];
+                break;
+            default:
+                renderedRow = this.renderedRows[cell.rowIndex];
+                break;
         }
+        if (renderedRow) {
+            renderedRow.onMouseEvent(eventName, mouseEvent, eventSource, cell);
+        }
+    }
 
-        var renderedRow = new RenderedRow(this.gridOptionsWrapper, this.valueService, this.$scope,
-            this.angularGrid, this.columnModel, this.expressionService, this.cellRendererMap,
-            this.selectionRendererFactory, this.$compile, this.templateService, this.selectionController,
+    private insertRow(node: any, rowIndex: any) {
+        var columns = this.columnController.getAllDisplayedColumns();
+        // if no cols, don't draw row
+        if (_.missingOrEmpty(columns)) { return; }
+
+        var renderedRow = new RenderedRow(this.$scope,
             this, this.eBodyContainer, this.ePinnedLeftColsContainer, this.ePinnedRightColsContainer,
-            node, rowIndex, this.eventService);
-        renderedRow.setMainRowWidth(mainRowWidth);
+            node, rowIndex);
+        this.context.wireBean(renderedRow);
 
         this.renderedRows[rowIndex] = renderedRow;
     }
@@ -453,194 +519,126 @@ export default class RowRenderer {
         });
     }
 
-    public getIndexOfRenderedNode(node: any): number {
-        var renderedRows = this.renderedRows;
-        var keys: string[] = Object.keys(renderedRows);
-        for (var i = 0; i < keys.length; i++) {
-            var key: string = keys[i];
-            if (renderedRows[key].getRowNode() === node) {
-                return renderedRows[key].getRowIndex();
-            }
-        }
-        return -1;
-    }
-
     // we use index for rows, but column object for columns, as the next column (by index) might not
     // be visible (header grouping) so it's not reliable, so using the column object instead.
-    public navigateToNextCell(key: any, rowIndex: number, column: Column) {
+    public navigateToNextCell(key: any, rowIndex: number, column: Column, floating: string) {
 
-        var cellToFocus = {rowIndex: rowIndex, column: column};
-        var renderedRow: RenderedRow;
-        var eCell: any;
+        var nextCell = new GridCell(rowIndex, floating, column);
 
         // we keep searching for a next cell until we find one. this is how the group rows get skipped
-        while (!eCell) {
-            cellToFocus = this.getNextCellToFocus(key, cellToFocus);
-            // no next cell means we have reached a grid boundary, eg left, right, top or bottom of grid
-            if (!cellToFocus) {
-                return;
+        while (true) {
+            nextCell = this.cellNavigationService.getNextCellToFocus(key, nextCell);
+
+            if (_.missing(nextCell)) {
+                break;
             }
-            // see if the next cell is selectable, if yes, use it, if not, skip it
-            renderedRow = this.renderedRows[cellToFocus.rowIndex];
-            eCell = renderedRow.getCellForCol(cellToFocus.column);
+
+            var skipGroupRows = this.gridOptionsWrapper.isGroupUseEntireRow();
+            if (skipGroupRows) {
+                var rowNode = this.rowModel.getRow(nextCell.rowIndex);
+                if (!rowNode.group) {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
 
-        // this scrolls the row into view
-        this.gridPanel.ensureIndexVisible(renderedRow.getRowIndex());
-
-        // this changes the css on the cell
-        this.focusCell(eCell, cellToFocus.rowIndex, cellToFocus.column.getIndex(), cellToFocus.column.getColDef(), true);
-    }
-
-    private getNextCellToFocus(key: any, lastCellToFocus: any) {
-        var lastRowIndex = lastCellToFocus.rowIndex;
-        var lastColumn = lastCellToFocus.column;
-
-        var nextRowToFocus: any;
-        var nextColumnToFocus: any;
-        switch (key) {
-            case Constants.KEY_UP :
-                // if already on top row, do nothing
-                if (lastRowIndex === this.firstVirtualRenderedRow) {
-                    return null;
-                }
-                nextRowToFocus = lastRowIndex - 1;
-                nextColumnToFocus = lastColumn;
-                break;
-            case Constants.KEY_DOWN :
-                // if already on bottom, do nothing
-                if (lastRowIndex === this.lastVirtualRenderedRow) {
-                    return null;
-                }
-                nextRowToFocus = lastRowIndex + 1;
-                nextColumnToFocus = lastColumn;
-                break;
-            case Constants.KEY_RIGHT :
-                var colToRight = this.columnModel.getDisplayedColAfter(lastColumn);
-                // if already on right, do nothing
-                if (!colToRight) {
-                    return null;
-                }
-                nextRowToFocus = lastRowIndex;
-                nextColumnToFocus = colToRight;
-                break;
-            case Constants.KEY_LEFT :
-                var colToLeft = this.columnModel.getDisplayedColBefore(lastColumn);
-                // if already on left, do nothing
-                if (!colToLeft) {
-                    return null;
-                }
-                nextRowToFocus = lastRowIndex;
-                nextColumnToFocus = colToLeft;
-                break;
-        }
-
-        return {
-            rowIndex: nextRowToFocus,
-            column: nextColumnToFocus
-        };
-    }
-
-    public onRowSelected(rowIndex: number, selected: boolean) {
-        if (this.renderedRows[rowIndex]) {
-            this.renderedRows[rowIndex].onRowSelected(selected);
-        }
-    }
-
-    // called by the renderedRow
-    public focusCell(eCell: any, rowIndex: number, colIndex: number, colDef: ColDef, forceBrowserFocus: any) {
-        // do nothing if cell selection is off
-        if (this.gridOptionsWrapper.isSuppressCellSelection()) {
+        // no next cell means we have reached a grid boundary, eg left, right, top or bottom of grid
+        if (!nextCell) {
             return;
         }
 
-        this.eParentsOfRows.forEach( function(rowContainer: HTMLElement) {
-            // remove any previous focus
-            _.querySelectorAll_replaceCssClass(rowContainer, '.ag-cell-focus', 'ag-cell-focus', 'ag-cell-no-focus');
-            _.querySelectorAll_replaceCssClass(rowContainer, '.ag-row-focus', 'ag-row-focus', 'ag-row-no-focus');
-
-            var selectorForCell = '[row="' + rowIndex + '"] [col="' + colIndex + '"]';
-            _.querySelectorAll_replaceCssClass(rowContainer, selectorForCell, 'ag-cell-no-focus', 'ag-cell-focus');
-            var selectorForRow = '[row="' + rowIndex + '"]';
-            _.querySelectorAll_replaceCssClass(rowContainer, selectorForRow, 'ag-row-no-focus', 'ag-row-focus');
-        });
-
-        this.focusedCell = {rowIndex: rowIndex, colIndex: colIndex, node: this.rowModel.getVirtualRow(rowIndex), colDef: colDef};
-
-        // this puts the browser focus on the cell (so it gets key presses)
-        if (forceBrowserFocus) {
-            eCell.focus();
+        // this scrolls the row into view
+        if (_.missing(nextCell.floating)) {
+            this.gridPanel.ensureIndexVisible(nextCell.rowIndex);
         }
 
-        this.eventService.dispatchEvent(Events.EVENT_CELL_FOCUSED, this.focusedCell);
-    }
+        if (!nextCell.column.isPinned()) {
+            this.gridPanel.ensureColumnVisible(nextCell.column);
+        }
 
-    // for API
-    public getFocusedCell() {
-        return this.focusedCell;
-    }
+        // need to nudge the scrolls for the floating items. otherwise when we set focus on a non-visible
+        // floating cell, the scrolls get out of sync
+        this.gridPanel.horizontallyScrollHeaderCenterAndFloatingCenter();
 
-    // called via API
-    public setFocusedCell(rowIndex: any, colIndex: any) {
-        var renderedRow = this.renderedRows[rowIndex];
-        var column = this.columnModel.getAllDisplayedColumns()[colIndex];
-        if (renderedRow && column) {
-            var eCell = renderedRow.getCellForCol(column);
-            this.focusCell(eCell, rowIndex, colIndex, column.getColDef(), true);
+        this.focusedCellController.setFocusedCell(nextCell.rowIndex, nextCell.column, nextCell.floating, true);
+        if (this.rangeController) {
+            this.rangeController.setRangeToCell(new GridCell(nextCell.rowIndex, nextCell.floating, nextCell.column));
         }
     }
 
-    // called by the cell, when tab is pressed while editing
-    public startEditingNextCell(rowIndex: any, column: any, shiftKey: any) {
+    private getComponentForCell(gridCell: GridCell): RenderedCell {
+        var rowComponent: RenderedRow;
+        switch (gridCell.floating) {
+            case Constants.FLOATING_TOP:
+                rowComponent = this.renderedTopFloatingRows[gridCell.rowIndex];
+                break;
+            case Constants.FLOATING_BOTTOM:
+                rowComponent = this.renderedBottomFloatingRows[gridCell.rowIndex];
+                break;
+            default:
+                rowComponent = this.renderedRows[gridCell.rowIndex];
+                break;
+        }
 
-        var firstRowToCheck = this.firstVirtualRenderedRow;
-        var lastRowToCheck = this.lastVirtualRenderedRow;
-        var currentRowIndex = rowIndex;
+        if (!rowComponent) {
+            return null;
+        }
 
-        var visibleColumns = this.columnModel.getAllDisplayedColumns();
-        var currentCol = column;
+        var cellComponent: RenderedCell = rowComponent.getRenderedCellForColumn(gridCell.column);
+        return cellComponent;
+    }
+
+    // called by the cell, when tab is pressed while editing.
+    // @return: true when navigation successful, otherwise false
+    public moveFocusToNextCell(rowIndex: any, column: any, floating: string, shiftKey: boolean, startEditing: boolean): boolean {
+
+        var nextCell = new GridCell(rowIndex, floating, column);
 
         while (true) {
 
-            var indexOfCurrentCol = visibleColumns.indexOf(currentCol);
+            nextCell = this.cellNavigationService.getNextTabbedCell(nextCell, shiftKey);
 
-            // move backward
-            if (shiftKey) {
-                // move along to the previous cell
-                currentCol = visibleColumns[indexOfCurrentCol - 1];
-                // check if end of the row, and if so, go back a row
-                if (!currentCol) {
-                    currentCol = visibleColumns[visibleColumns.length - 1];
-                    currentRowIndex--;
-                }
-
-                // if got to end of rendered rows, then quit looking
-                if (currentRowIndex < firstRowToCheck) {
-                    return;
-                }
-                // move forward
-            } else {
-                // move along to the next cell
-                currentCol = visibleColumns[indexOfCurrentCol + 1];
-                // check if end of the row, and if so, go forward a row
-                if (!currentCol) {
-                    currentCol = visibleColumns[0];
-                    currentRowIndex++;
-                }
-
-                // if got to end of rendered rows, then quit looking
-                if (currentRowIndex > lastRowToCheck) {
-                    return;
-                }
+            // if no 'next cell', means we have got to last cell of grid, so nothing to move to,
+            // so bottom right cell going forwards, or top left going backwards
+            if (!nextCell) {
+                return false;
             }
 
-            var nextRenderedRow: RenderedRow = this.renderedRows[currentRowIndex];
-            var nextRenderedCell: RenderedCell = nextRenderedRow.getRenderedCellForColumn(currentCol);
-            if (nextRenderedCell.isCellEditable()) {
-                nextRenderedCell.startEditing();
+            var nextRenderedCell = this.getComponentForCell(nextCell);
+
+            // if editing, but cell not editable, skip cell
+            if (startEditing && !nextRenderedCell.isCellEditable()) {
+                continue;
+            }
+
+            // this scrolls the row into view
+            var cellIsNotFloating = _.missing(nextCell.floating);
+            if (cellIsNotFloating) {
+                this.gridPanel.ensureIndexVisible(nextCell.rowIndex);
+            }
+
+            this.gridPanel.ensureColumnVisible(nextCell.column);
+            // need to nudge the scrolls for the floating items. otherwise when we set focus on a non-visible
+            // floating cell, the scrolls get out of sync
+            this.gridPanel.horizontallyScrollHeaderCenterAndFloatingCenter();
+
+            if (startEditing) {
+                nextRenderedCell.startEditingIfEnabled();
                 nextRenderedCell.focusCell(false);
-                return;
+            } else {
+                nextRenderedCell.focusCell(true);
             }
+
+            // by default, when we click a cell, it gets selected into a range, so to keep keyboard navigation
+            // consistent, we set into range here also.
+            if (this.rangeController) {
+                this.rangeController.setRangeToCell(new GridCell(nextCell.rowIndex, nextCell.floating, nextCell.column));
+            }
+
+            // we successfully tabbed onto a grid cell, so return true
+            return true;
         }
     }
 }

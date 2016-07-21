@@ -1,43 +1,53 @@
-import _ from '../utils';
-import GridOptionsWrapper from "../gridOptionsWrapper";
-import PopupService from "../widgets/agPopupService";
-import ValueService from "../valueService";
+import {Utils as _} from "../utils";
+import {GridOptionsWrapper} from "../gridOptionsWrapper";
+import {PopupService} from "../widgets/popupService";
+import {ValueService} from "../valueService";
 import {ColumnController} from "../columnController/columnController";
-import {Grid} from "../grid";
 import {RowNode} from "../entities/rowNode";
-import Column from "../entities/column";
-import TextFilter from "./textFilter";
-import NumberFilter from "./numberFilter";
-import SetFilter from "./setFilter";
+import {Column} from "../entities/column";
+import {TextFilter} from "./textFilter";
+import {NumberFilter} from "./numberFilter";
+import {Bean, PreDestroy, Autowired, PostConstruct, Context} from "../context/context";
+import {IRowModel} from "../interfaces/iRowModel";
+import {EventService} from "../eventService";
+import {Events} from "../events";
 
-export default class FilterManager {
+@Bean('filterManager')
+export class FilterManager {
 
-    private $compile: any;
-    private $scope: any;
-    private gridOptionsWrapper: GridOptionsWrapper;
-    private grid: any;
-    private allFilters: any;
-    private rowModel: any;
-    private popupService: PopupService;
-    private valueService: ValueService;
-    private columnController: ColumnController;
-    private quickFilter: string;
+    @Autowired('$compile') private $compile: any;
+    @Autowired('$scope') private $scope: any;
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('gridCore') private gridCore: any;
+    @Autowired('popupService') private popupService: PopupService;
+    @Autowired('valueService') private valueService: ValueService;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('rowModel') private rowModel: IRowModel;
+    @Autowired('eventService') private eventService: EventService;
+    @Autowired('enterprise') private enterprise: boolean;
+    @Autowired('context') private context: Context;
+
+    private allFilters: any = {};
+    private quickFilter: string = null;
 
     private advancedFilterPresent: boolean;
     private externalFilterPresent: boolean;
 
-    public init(grid: Grid, gridOptionsWrapper: GridOptionsWrapper, $compile: any, $scope: any,
-                columnController: ColumnController, popupService: PopupService, valueService: ValueService) {
-        this.$compile = $compile;
-        this.$scope = $scope;
-        this.gridOptionsWrapper = gridOptionsWrapper;
-        this.grid = grid;
-        this.allFilters = {};
-        this.columnController = columnController;
-        this.popupService = popupService;
-        this.valueService = valueService;
-        this.columnController = columnController;
-        this.quickFilter = null;
+    private availableFilters: {[key: string]: any} = {
+        'text': TextFilter,
+        'number': NumberFilter
+    };
+
+    @PostConstruct
+    public init(): void {
+        this.eventService.addEventListener(Events.EVENT_ROW_DATA_CHANGED, this.onNewRowsLoaded.bind(this));
+        this.eventService.addEventListener(Events.EVENT_NEW_COLUMNS_LOADED, this.onNewColumnsLoaded.bind(this));
+
+        this.quickFilter = this.parseQuickFilter(this.gridOptionsWrapper.getQuickFilterText());
+    }
+
+    public registerFilter(key: string, Filter: any): void {
+        this.availableFilters[key] = Filter;
     }
 
     public setFilterModel(model: any) {
@@ -51,7 +61,7 @@ export default class FilterManager {
             });
             // at this point, processedFields contains data for which we don't have a filter working yet
             _.iterateArray(modelKeys, (colId) => {
-                var column = this.columnController.getColumn(colId);
+                var column = this.columnController.getPrimaryColumn(colId);
                 if (!column) {
                     console.warn('Warning ag-grid setFilterModel - no column found for colId ' + colId);
                     return;
@@ -64,7 +74,7 @@ export default class FilterManager {
                 this.setModelOnFilterWrapper(filterWrapper.filter, null);
             });
         }
-        this.grid.onFilterChanged();
+        this.onFilterChanged();
     }
 
     private setModelOnFilterWrapper(filter: { getApi: () => { setModel: Function }}, newModel: any) {
@@ -95,15 +105,11 @@ export default class FilterManager {
                 return;
             }
             var model = filterApi.getModel();
-            if (model) {
+            if (_.exists(model)) {
                 result[key] = model;
             }
         });
         return result;
-    }
-
-    public setRowModel(rowModel: any) {
-        this.rowModel = rowModel;
     }
 
     // returns true if any advanced filter (ie not quick filter) active
@@ -116,6 +122,9 @@ export default class FilterManager {
             }
             if (filterWrapper.filter.isFilterActive()) {
                 atLeastOneActive = true;
+                filterWrapper.column.setFilterActive(true);
+            } else {
+                filterWrapper.column.setFilterActive(false);
             }
         });
 
@@ -125,19 +134,6 @@ export default class FilterManager {
     // returns true if quickFilter or advancedFilter
     public isAnyFilterPresent(): boolean {
         return this.isQuickFilterPresent() || this.advancedFilterPresent || this.externalFilterPresent;
-    }
-
-    // returns true if given col has a filter active
-    public isFilterPresentForCol(colId: any) {
-        var filterWrapper = this.allFilters[colId];
-        if (!filterWrapper) {
-            return false;
-        }
-        if (!filterWrapper.filter.isFilterActive) { // because users can do custom filters, give nice error message
-            console.error('Filter is missing method isFilterActive');
-        }
-        var filterPresent = filterWrapper.filter.isFilterActive();
-        return filterPresent;
     }
 
     private doesFilterPass(node: RowNode, filterToSkip?: any) {
@@ -156,6 +152,11 @@ export default class FilterManager {
                 continue
             }
 
+            // don't bother with filters that are not active
+            if (!filterWrapper.filter.isFilterActive()) {
+                continue;
+            }
+
             if (!filterWrapper.filter.doesFilterPass) { // because users can do custom filters, give nice error message
                 console.error('Filter is missing method doesFilterPass');
             }
@@ -171,32 +172,31 @@ export default class FilterManager {
         return true;
     }
 
-    // returns true if it has changed (not just same value again)
-    public setQuickFilter(newFilter: any): boolean {
-        if (newFilter === undefined || newFilter === "") {
-            newFilter = null;
+    private parseQuickFilter(newFilter: string): string {
+        if (_.missing(newFilter) || newFilter === "") {
+            return null;
         }
-        if (this.quickFilter !== newFilter) {
-            if (this.gridOptionsWrapper.isVirtualPaging()) {
-                console.warn('ag-grid: cannot do quick filtering when doing virtual paging');
-                return;
-            }
 
-            //want 'null' to mean to filter, so remove undefined and empty string
-            if (newFilter === undefined || newFilter === "") {
-                newFilter = null;
-            }
-            if (newFilter !== null) {
-                newFilter = newFilter.toUpperCase();
-            }
-            this.quickFilter = newFilter;
-            return true;
-        } else {
-            return false;
+        if (this.gridOptionsWrapper.isRowModelVirtual()) {
+            console.warn('ag-grid: cannot do quick filtering when doing virtual paging');
+            return null;
+        }
+
+        return newFilter.toUpperCase();
+    }
+
+    // returns true if it has changed (not just same value again)
+    public setQuickFilter(newFilter: any): void {
+        var parsedFilter = this.parseQuickFilter(newFilter);
+        if (this.quickFilter !== parsedFilter) {
+            this.quickFilter = parsedFilter;
+            this.onFilterChanged();
         }
     }
 
     public onFilterChanged(): void {
+        this.eventService.dispatchEvent(Events.EVENT_BEFORE_FILTER_CHANGED);
+
         this.advancedFilterPresent = this.isAdvancedFilterPresent();
         this.externalFilterPresent = this.gridOptionsWrapper.isExternalFilterPresent();
 
@@ -205,6 +205,10 @@ export default class FilterManager {
                 filterWrapper.filter.onAnyFilterChanged();
             }
         });
+
+        this.eventService.dispatchEvent(Events.EVENT_FILTER_CHANGED);
+
+        this.eventService.dispatchEvent(Events.EVENT_AFTER_FILTER_CHANGED);
     }
 
     public isQuickFilterPresent(): boolean {
@@ -248,9 +252,8 @@ export default class FilterManager {
     private aggregateRowForQuickFilter(node: RowNode) {
         var aggregatedText = '';
         var that = this;
-        this.columnController.getAllColumns().forEach(function (column: Column) {
-            var data = node.data;
-            var value = that.valueService.getValue(column.getColDef(), data, node);
+        this.columnController.getAllPrimaryColumns().forEach(function (column: Column) {
+            var value = that.valueService.getValue(column, node);
             if (value && value !== '') {
                 aggregatedText = aggregatedText + value.toString().toUpperCase() + "_";
             }
@@ -258,7 +261,7 @@ export default class FilterManager {
         node.quickFilterAggregateText = aggregatedText;
     }
 
-    public onNewRowsLoaded() {
+    private onNewRowsLoaded() {
         var that = this;
         Object.keys(this.allFilters).forEach(function (field) {
             var filter = that.allFilters[field].filter;
@@ -271,7 +274,7 @@ export default class FilterManager {
     private createValueGetter(column: Column) {
         var that = this;
         return function valueGetter(node: any) {
-            return that.valueService.getValue(column.getColDef(), node.data, node);
+            return that.valueService.getValue(column, node);
         };
     }
 
@@ -284,7 +287,7 @@ export default class FilterManager {
         }
     }
 
-    private getOrCreateFilterWrapper(column: Column) {
+    public getOrCreateFilterWrapper(column: Column): FilterWrapper {
         var filterWrapper = this.allFilters[column.getColId()];
 
         if (!filterWrapper) {
@@ -295,10 +298,23 @@ export default class FilterManager {
         return filterWrapper;
     }
 
-    private createFilterWrapper(column: Column) {
+    // destroys the filter, so it not longer takes par
+    public destroyFilter(column: Column): void {
+        var filterWrapper = this.allFilters[column.getColId()];
+        if (filterWrapper) {
+            if (filterWrapper.destroy) {
+                filterWrapper.destroy();
+            }
+            delete this.allFilters[column.getColId()];
+            this.onFilterChanged();
+            filterWrapper.column.setFilterActive(false);
+        }
+    }
+
+    private createFilterWrapper(column: Column): FilterWrapper {
         var colDef = column.getColDef();
 
-        var filterWrapper = {
+        var filterWrapper: FilterWrapper = {
             column: column,
             filter: <any> null,
             scope: <any> null,
@@ -310,24 +326,27 @@ export default class FilterManager {
             // first up, create child scope if needed
             if (this.gridOptionsWrapper.isAngularCompileFilters()) {
                 filterWrapper.scope = this.$scope.$new();
+                filterWrapper.scope.context = this.gridOptionsWrapper.getContext();
             }
             // now create filter (had to cast to any to get 'new' working)
             this.assertMethodHasNoParameters(colDef.filter);
             filterWrapper.filter = new (<any>colDef.filter)();
-        } else if (colDef.filter === 'text') {
-            filterWrapper.filter = new TextFilter();
-        } else if (colDef.filter === 'number') {
-            filterWrapper.filter = new NumberFilter();
+        } else if (_.missing(colDef.filter) || typeof colDef.filter === 'string') {
+            var Filter = this.getFilterFromCache(<string>colDef.filter);
+            filterWrapper.filter = new Filter();
         } else {
-            filterWrapper.filter = new SetFilter();
+            console.error('ag-Grid: colDef.filter should be function or a string');
         }
 
-        var filterChangedCallback = this.grid.onFilterChanged.bind(this.grid);
-        var filterModifiedCallback = this.grid.onFilterModified.bind(this.grid);
+        this.context.wireBean(filterWrapper.filter);
+
+        var filterChangedCallback = this.onFilterChanged.bind(this);
+        var filterModifiedCallback = () => this.eventService.dispatchEvent(Events.EVENT_FILTER_MODIFIED);
         var doesRowPassOtherFilters = this.doesRowPassOtherFilters.bind(this, filterWrapper.filter);
         var filterParams = colDef.filterParams;
 
         var params = {
+            column: column,
             colDef: colDef,
             rowModel: this.rowModel,
             filterChangedCallback: filterChangedCallback,
@@ -336,7 +355,7 @@ export default class FilterManager {
             localeTextFunc: this.gridOptionsWrapper.getLocaleTextFunc(),
             valueGetter: this.createValueGetter(column),
             doesRowPassOtherFilter: doesRowPassOtherFilters,
-            context: this.gridOptionsWrapper.getContext,
+            context: this.gridOptionsWrapper.getContext(),
             $scope: filterWrapper.scope
         };
         if (!filterWrapper.filter.init) { // because users can do custom filters, give nice error message
@@ -370,12 +389,40 @@ export default class FilterManager {
         return filterWrapper;
     }
 
+    private getFilterFromCache(filterType: string): any {
+        var defaultFilterType = this.enterprise ? 'set' : 'text';
+        var defaultFilter = this.availableFilters[defaultFilterType];
+
+        if (_.missing(filterType)) {
+            return defaultFilter;
+        }
+
+        if (!this.enterprise && filterType==='set') {
+            console.warn('ag-Grid: Set filter is only available in Enterprise ag-Grid');
+            filterType = 'text';
+        }
+
+        if (this.availableFilters[filterType]) {
+            return this.availableFilters[filterType];
+        } else {
+            console.error('ag-Grid: Could not find filter type ' + filterType);
+            return this.availableFilters[defaultFilter];
+        }
+    }
+
+    private onNewColumnsLoaded(): void {
+        this.destroy();
+    }
+
+    @PreDestroy
     public destroy() {
         _.iterateObject(this.allFilters, (key: string, filterWrapper: any) => {
             if (filterWrapper.filter.destroy) {
                 filterWrapper.filter.destroy();
+                filterWrapper.column.setFilterActive(false);
             }
         });
+        this.allFilters = {};
     }
 
     private assertMethodHasNoParameters(theMethod: any) {
@@ -386,21 +433,11 @@ export default class FilterManager {
         }
     }
 
-    public showFilter(column: Column, eventSource: any) {
+}
 
-        var filterWrapper = this.getOrCreateFilterWrapper(column);
-
-        // need to show filter before positioning, as only after filter
-        // is visible can we find out what the width of it is
-        var hidePopup = this.popupService.addAsModalPopup(filterWrapper.gui, true);
-        this.popupService.positionPopup(eventSource, filterWrapper.gui, true);
-
-        if (filterWrapper.filter.afterGuiAttached) {
-            var params = {
-                hidePopup: hidePopup,
-                eventSource: eventSource
-            };
-            filterWrapper.filter.afterGuiAttached(params);
-        }
-    }
+export interface FilterWrapper {
+    column: Column,
+    filter: any,
+    scope: any,
+    gui: HTMLElement
 }

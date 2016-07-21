@@ -1,6 +1,6 @@
-import _ from '../utils';
+import {Utils as _} from '../utils';
 
-export default class BorderLayout {
+export class BorderLayout {
 
     private eNorthWrapper: any;
     private eSouthWrapper: any;
@@ -24,6 +24,8 @@ export default class BorderLayout {
     private id: any;
     private childPanels: any;
     private centerHeightLastTime: any;
+    private centerWidthLastTime: any;
+    private centerLeftMarginLastTime: any;
 
     private sizeChangeListeners = <any>[];
     private overlays: any;
@@ -195,7 +197,7 @@ export default class BorderLayout {
 
     // full height never changes the height, because the center is always 100%,
     // however we do check for change, to inform the listeners
-    private layoutHeightFullHeight() {
+    private layoutHeightFullHeight(): boolean {
         var centerHeight = _.offsetHeight(this.eGui);
         if (centerHeight < 0) {
             centerHeight = 0;
@@ -208,7 +210,7 @@ export default class BorderLayout {
         }
     }
 
-    private layoutHeightNormal() {
+    private layoutHeightNormal(): boolean {
 
         var totalHeight = _.offsetHeight(this.eGui);
         var northHeight = _.offsetHeight(this.eNorthWrapper);
@@ -232,7 +234,7 @@ export default class BorderLayout {
         return this.centerHeightLastTime;
     }
 
-    private layoutWidth() {
+    private layoutWidth(): boolean {
         var totalWidth = _.offsetWidth(this.eGui);
         var eastWidth = _.offsetWidth(this.eEastWrapper);
         var westWidth = _.offsetWidth(this.eWestWrapper);
@@ -242,7 +244,21 @@ export default class BorderLayout {
             centerWidth = 0;
         }
 
-        this.eCenterWrapper.style.width = centerWidth + 'px';
+        var atLeastOneChanged = false;
+
+        if (this.centerLeftMarginLastTime !== westWidth) {
+            this.centerLeftMarginLastTime = westWidth;
+            this.eCenterWrapper.style.marginLeft = westWidth + 'px';
+            atLeastOneChanged = true;
+        }
+
+        if (this.centerWidthLastTime !== centerWidth) {
+            this.centerWidthLastTime = centerWidth;
+            this.eCenterWrapper.style.width = centerWidth + 'px';
+            atLeastOneChanged = true;
+        }
+
+        return atLeastOneChanged;
     }
 
     public setEastVisible(visible: any) {
@@ -281,10 +297,4 @@ export default class BorderLayout {
         }
     }
 
-    public setSouthVisible(visible: any) {
-        if (this.eSouthWrapper) {
-            this.eSouthWrapper.style.display = visible ? '' : 'none';
-        }
-        this.doLayout();
-    }
 }

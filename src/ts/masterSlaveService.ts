@@ -1,43 +1,45 @@
-import GridOptionsWrapper from "./gridOptionsWrapper";
+import {GridOptionsWrapper} from "./gridOptionsWrapper";
 import {ColumnController} from "./columnController/columnController";
-import GridPanel from "./gridPanel/gridPanel";
+import {GridPanel} from "./gridPanel/gridPanel";
 import {Logger} from "./logger";
-import EventService from "./eventService";
+import {EventService} from "./eventService";
 import {LoggerFactory} from "./logger";
 import {Events} from "./events";
 import {GridOptions} from "./entities/gridOptions";
-import ColumnChangeEvent from "./columnChangeEvent";
-import Column from "./entities/column";
-import ColumnGroup from "./entities/columnGroup";
-export default class MasterSlaveService {
+import {ColumnChangeEvent} from "./columnChangeEvent";
+import {Column} from "./entities/column";
+import {ColumnGroup} from "./entities/columnGroup";
+import {Bean} from "./context/context";
+import {Qualifier} from "./context/context";
+import {Autowired} from "./context/context";
+import {PostConstruct} from "./context/context";
 
-    private gridOptionsWrapper: GridOptionsWrapper;
-    private columnController: ColumnController;
-    private gridPanel: GridPanel;
+@Bean('masterSlaveService')
+export class MasterSlaveService {
+
+    @Autowired('gridOptionsWrapper') private gridOptionsWrapper: GridOptionsWrapper;
+    @Autowired('columnController') private columnController: ColumnController;
+    @Autowired('gridPanel') private gridPanel: GridPanel;
+    @Autowired('eventService') private eventService: EventService;
+
     private logger: Logger;
-    private eventService: EventService;
 
     // flag to mark if we are consuming. to avoid cyclic events (ie slave firing back to master
     // while processing a master event) we mark this if consuming an event, and if we are, then
     // we don't fire back any events.
     private consuming = false;
 
-    public init(gridOptionsWrapper: GridOptionsWrapper,
-                columnController: ColumnController,
-                gridPanel: GridPanel,
-                loggerFactory: LoggerFactory,
-                eventService: EventService) {
-        this.gridOptionsWrapper = gridOptionsWrapper;
-        this.columnController = columnController;
-        this.gridPanel = gridPanel;
-        this.eventService = eventService;
+    private setBeans(@Qualifier('loggerFactory') loggerFactory: LoggerFactory) {
         this.logger = loggerFactory.create('MasterSlaveService');
+    }
 
-        eventService.addEventListener(Events.EVENT_COLUMN_MOVED, this.fireColumnEvent.bind(this));
-        eventService.addEventListener(Events.EVENT_COLUMN_VISIBLE, this.fireColumnEvent.bind(this));
-        eventService.addEventListener(Events.EVENT_COLUMN_PINNED, this.fireColumnEvent.bind(this));
-        eventService.addEventListener(Events.EVENT_COLUMN_GROUP_OPENED, this.fireColumnEvent.bind(this));
-        eventService.addEventListener(Events.EVENT_COLUMN_RESIZED, this.fireColumnEvent.bind(this));
+    @PostConstruct
+    public init(): void {
+        this.eventService.addEventListener(Events.EVENT_COLUMN_MOVED, this.fireColumnEvent.bind(this));
+        this.eventService.addEventListener(Events.EVENT_COLUMN_VISIBLE, this.fireColumnEvent.bind(this));
+        this.eventService.addEventListener(Events.EVENT_COLUMN_PINNED, this.fireColumnEvent.bind(this));
+        this.eventService.addEventListener(Events.EVENT_COLUMN_GROUP_OPENED, this.fireColumnEvent.bind(this));
+        this.eventService.addEventListener(Events.EVENT_COLUMN_RESIZED, this.fireColumnEvent.bind(this));
     }
 
     // common logic across all the fire methods
@@ -103,8 +105,7 @@ export default class MasterSlaveService {
         var result: string[] = [];
         if (event.getColumn()) {
             result.push(event.getColumn().getColId());
-        }
-        if (event.getColumns()) {
+        } else if (event.getColumns()) {
             event.getColumns().forEach( (column: Column) => {
                 result.push(column.getColId());
             });
@@ -120,7 +121,7 @@ export default class MasterSlaveService {
             var masterColumn = event.getColumn();
             var slaveColumn: Column;
             if (masterColumn) {
-                slaveColumn = this.columnController.getColumn(masterColumn.getColId());
+                slaveColumn = this.columnController.getPrimaryColumn(masterColumn.getColId());
             }
             // if event was with respect to a master column, that is not present in this
             // grid, then we ignore the event
@@ -142,9 +143,15 @@ export default class MasterSlaveService {
             var masterColumns = this.getMasterColumns(event);
 
             switch (event.getType()) {
+                case Events.EVENT_COLUMN_PIVOT_CHANGED:
+                    // we cannot support pivoting with master / slave as the columns will be out of sync as the
+                    // grids will have columns created based on the row data of the grid.
+                    console.warn('ag-Grid: pivoting is not supported with Master / Slave grids. ' +
+                        'You can only use one of these features at a time in a grid.');
+                    break;
                 case Events.EVENT_COLUMN_MOVED:
-                    this.logger.log('onColumnEvent-> processing '+event+' fromIndex = '+ event.getFromIndex() + ', toIndex = ' + event.getToIndex());
-                    this.columnController.moveColumn(event.getFromIndex(), event.getToIndex());
+                    this.logger.log('onColumnEvent-> processing '+event+' toIndex = ' + event.getToIndex());
+                    this.columnController.moveColumns(columnIds, event.getToIndex());
                     break;
                 case Events.EVENT_COLUMN_VISIBLE:
                     this.logger.log('onColumnEvent-> processing '+event+' visible = '+ event.isVisible());
